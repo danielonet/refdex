@@ -1,0 +1,25 @@
+{
+  "name": "@refdex/server",
+  "version": "0.0.1",
+  "private": true,
+  "description": "RefDex daemon: file watching, indexing, SQLite and the MCP server",
+  "type": "module",
+  "bin": {
+    "refdex": "dist/refdex.cjs"
+  },
+  "scripts": {
+    "check-types": "tsc -p .",
+    "dev": "node src/main.ts",
+    "build": "node scripts/build.mjs",
+    "build:sea": "node scripts/build.mjs && node scripts/build-sea.mjs"
+  },
+  "dependencies": {
+    "@refdex/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "22.x",
+    "esbuild": "^0.28.1",
+    "postject": "^1.0.0-alpha.6",
+    "typescript": "^6.0.3"
+  }
+}

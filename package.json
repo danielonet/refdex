@@ -1,0 +1,29 @@
+{
+  "name": "refdex-monorepo",
+  "private": true,
+  "description": "RefDex: method-level code index for AI assistants, served over MCP",
+  "workspaces": [
+    "packages/core",
+    "packages/server",
+    "packages/vscode"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check-types": "npm run check-types --workspaces --if-present",
+    "spike": "npm run spike -w @refdex/core",
+    "build": "npm run build -w @refdex/server && npm run compile -w refdex",
+    "build:sea": "npm run build:sea -w @refdex/server",
+    "build:icon-font": "node scripts/build-icon-font.js",
+    "vsix:install": "scripts/build-and-install.sh",
+    "vsix:uninstall": "scripts/uninstall.sh",
+    "publish:marketplace": "scripts/publish-marketplace.sh"
+  },
+  "devDependencies": {
+    "svg2ttf": "^6.1.0",
+    "svgicons2svgfont": "^15.0.1",
+    "svgpath": "^2.6.0",
+    "ttf2woff": "^3.0.0"
+  }
+}

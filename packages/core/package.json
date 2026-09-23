@@ -1,0 +1,25 @@
+{
+  "name": "@refdex/core",
+  "version": "0.0.1",
+  "private": true,
+  "description": "RefDex indexer core: tree-sitter parsing, language adapters, database",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check-types": "tsc -p .",
+    "spike": "node spike/print-symbols.ts"
+  },
+  "dependencies": {
+    "tree-sitter-c-sharp": "^0.23.5",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-python": "^0.25.0",
+    "tree-sitter-typescript": "^0.23.2",
+    "web-tree-sitter": "^0.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.x",
+    "typescript": "^6.0.3"
+  }
+}
