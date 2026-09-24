@@ -40,6 +40,8 @@ export interface DaemonInfo {
   dbBytes: number;
   watching: boolean;
   exclude: string[];
+  include: string[];
+  languages: string[];
   node: string;
 }
 
@@ -58,6 +60,8 @@ export interface TablePage {
 
 export interface DaemonOptions {
   exclude: string[];
+  include: string[];
+  languages: string[];
   watch: boolean;
 }
 
@@ -106,7 +110,12 @@ export class Daemon implements vscode.Disposable {
     if (this.child) {
       return;
     }
-    const args = ['serve', '--root', this.root, '--db', this.dbPath, ...this.options.exclude.flatMap((p) => ['--exclude', p])];
+    const args = [
+      'serve', '--root', this.root, '--db', this.dbPath,
+      ...this.options.exclude.flatMap((p) => ['--exclude', p]),
+      ...this.options.include.flatMap((p) => ['--include', p]),
+      ...this.options.languages.flatMap((l) => ['--language', l]),
+    ];
     if (!this.options.watch) {
       args.push('--no-watch');
     }

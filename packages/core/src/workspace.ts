@@ -30,6 +30,16 @@ export function isConfigFile(path: string): boolean {
   return name === '.gitignore' || Object.values(PROJECT_MARKERS).some((m) => m(name));
 }
 
+/** What to index, on top of .gitignore and the built-in folder list (the `refdex.*` settings). */
+export interface WorkspaceOptions {
+  /** Extra gitignore-style patterns to leave out. */
+  exclude?: readonly string[];
+  /** When not empty, only files matching one of these gitignore-style patterns are indexed. */
+  include?: readonly string[];
+  /** Languages to index; `typescript` covers `tsx`. Empty or unset means all. */
+  languages?: readonly string[];
+}
+
 interface WorkspacePackage {
   dir: string;
   manifest: { exports?: unknown; types?: string; typings?: string; main?: string; module?: string };
@@ -48,16 +58,19 @@ export class Workspace {
   private readonly tsconfigs = new Map<string, TsConfig | undefined>();
   private packages?: Map<string, WorkspacePackage>;
   private pythonRootsCache?: string[];
+  private readonly includeMatcher?: Ignore;
+  private readonly languages?: Set<string>;
 
-  private constructor(root: string) {
+  private constructor(root: string, opts: WorkspaceOptions) {
     this.root = root;
+    if (opts.include?.length) this.includeMatcher = ignore().add([...opts.include]);
+    if (opts.languages?.length) this.languages = new Set(opts.languages);
   }
 
-  /** `exclude`: extra gitignore-style patterns relative to the root (the `refdex.exclude` setting). */
-  static async scan(root: string, exclude: readonly string[] = []): Promise<Workspace> {
-    const ws = new Workspace(root);
+  static async scan(root: string, opts: WorkspaceOptions = {}): Promise<Workspace> {
+    const ws = new Workspace(root, opts);
     await ws.loadIgnore(root, join(root, '.git', 'info', 'exclude'));
-    if (exclude.length) ws.ignores.set(root, (ws.ignores.get(root) ?? ignore()).add([...exclude]));
+    if (opts.exclude?.length) ws.ignores.set(root, (ws.ignores.get(root) ?? ignore()).add([...opts.exclude]));
     await ws.walk(root);
     for (const pkg of ws.markers.get('package.json') ?? []) {
       await ws.loadPackage(pkg);
@@ -97,7 +110,7 @@ export class Workspace {
           if (!this.isIgnored(path, true)) pending.push(path);
         } else if (entry.isFile() && !this.isIgnored(path, false)) {
           this.noteMarker(path);
-          if (languageForPath(path) && (await stat(path)).size <= MAX_FILE_BYTES) {
+          if (this.wanted(path) && (await stat(path)).size <= MAX_FILE_BYTES) {
             this.files.add(path);
             found.push(path);
           }
@@ -132,10 +145,18 @@ export class Workspace {
    */
   async refresh(path: string): Promise<boolean> {
     const info = await stat(path).catch(() => undefined);
-    const indexable = !!info?.isFile() && !!languageForPath(path) && info.size <= MAX_FILE_BYTES && !this.isIgnored(path, false);
+    const indexable = !!info?.isFile() && this.wanted(path) && info.size <= MAX_FILE_BYTES && !this.isIgnored(path, false);
     if (indexable) this.files.add(path);
     else this.files.delete(path);
     return indexable;
+  }
+
+  /** A supported language that is enabled, and inside the include patterns if there are any. */
+  private wanted(path: string): boolean {
+    const language = languageForPath(path);
+    if (!language) return false;
+    if (this.languages && !this.languages.has(language === 'tsx' ? 'typescript' : language)) return false;
+    return !this.includeMatcher || this.includeMatcher.ignores(relative(this.root, path).split(sep).join('/'));
   }
 
   hasFile(path: string): boolean {

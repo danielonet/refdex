@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { IndexDb, type BrowseTable, type IndexSummary } from '@refdex/core';
+import { IndexDb, type BrowseTable, type IndexSummary, type WorkspaceOptions } from '@refdex/core';
 import { TreeWatcher } from './watcher.ts';
 import { startIndexWorker, type WorkerReply } from './worker.ts';
 
@@ -19,9 +19,7 @@ import { startIndexWorker, type WorkerReply } from './worker.ts';
  * from a second connection (SQLite WAL lets readers run during writes). Once the workspace has
  * been indexed, a file watcher keeps it up to date.
  */
-export interface ServeOptions {
-  /** Extra gitignore-style patterns to leave out of the index. */
-  exclude: string[];
+export interface ServeOptions extends WorkspaceOptions {
   /** Keep the index up to date with a file watcher (default on). */
   watch: boolean;
 }
@@ -29,7 +27,7 @@ export interface ServeOptions {
 export async function serve(root: string, dbPath: string, opts: ServeOptions): Promise<void> {
   const db = new IndexDb(dbPath);
   const send = (msg: object) => process.stdout.write(`${JSON.stringify(msg)}\n`);
-  const worker = startIndexWorker({ root, dbPath, exclude: opts.exclude });
+  const worker = startIndexWorker({ root, dbPath, options: { exclude: opts.exclude, include: opts.include, languages: opts.languages } });
 
   // ---- indexing queue: at most one run at a time; requests arriving meanwhile are merged ----
   let running = false;
@@ -119,7 +117,9 @@ export async function serve(root: string, dbPath: string, opts: ServeOptions): P
       dbPath,
       dbBytes: fileSize(dbPath) + fileSize(`${dbPath}-wal`),
       watching: !!watcher,
-      exclude: opts.exclude,
+      exclude: opts.exclude ?? [],
+      include: opts.include ?? [],
+      languages: opts.languages ?? [],
       node: process.version,
     }),
     tables: () => db.tables(),

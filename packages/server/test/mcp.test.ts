@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -42,6 +42,15 @@ describe('refdex mcp over stdio', () => {
     const res = await client.callTool({ name: 'search_symbols', arguments: { query: 'Invoice', kind: 'class' } });
     const text = (res.content as { type: string; text: string }[])[0].text;
     assert.match(text, /class com\.acme\.model\.Invoice {2}src\/main\/java\/com\/acme\/model\/Invoice\.java:4-10\n {2}public class Invoice {2}\/\/ An invoice\./);
+  });
+
+  it('logs each tool call with the client name', async () => {
+    await client.callTool({ name: 'get_file_outline', arguments: { path: 'pom.xml' } });
+    const lines = (await readFile(join(root, '.refdex', 'mcp-usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    assert.ok(lines.length >= 2);
+    assert.equal(lines.at(-1).client, 'refdex-test');
+    assert.equal(lines.at(-1).tool, 'get_file_outline');
+    assert.ok(lines.at(-1).chars > 0);
   });
 
   it('rejects invalid arguments', async () => {

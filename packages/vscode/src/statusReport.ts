@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import type { ClientState } from './clients';
 import type { IndexStats } from './daemon';
+import type { ClientUsage } from './usage';
 import { count, formatBytes, LANGUAGE_NAMES, timeAgo } from './webviewUtil';
 
 /**
@@ -12,6 +14,7 @@ const HOVER_SEARCH = 'refdex.hover.searchSymbols';
 const HOVER_OPEN_DB = 'refdex.hover.openDatabase';
 const HOVER_SETTINGS = 'refdex.hover.openSettings';
 const HOVER_TOGGLE_WATCH = 'refdex.hover.toggleWatch';
+const HOVER_CONNECT_CLAUDE = 'refdex.hover.connectClaudeCode';
 /** The ⓘ icons: hovering shows the explanation as a tooltip, clicking shows it as a message. */
 const HOVER_EXPLAIN = 'refdex.hover.explain';
 /** Clicking the status bar item opens its report instead of doing anything by itself. */
@@ -26,6 +29,9 @@ const EXPLAIN = {
   database: 'The index is a SQLite database in VS Code\'s storage for this workspace, not in your repository. Open it to browse or export its tables.',
   regenerate: 'Drops the whole index and builds it again from scratch. Normally not needed: the index updates itself as files change.',
   index: 'RefDex parses Python, TypeScript, Java and C# files into a local symbol index that AI assistants query instead of reading whole files.',
+  copilot: 'RefDex is registered as an MCP server for GitHub Copilot agent mode. Copilot starts it when a chat needs its tools.',
+  claude: 'Claude Code reads MCP servers from its settings. Connecting adds RefDex for this project only (private to you) or to the shared .mcp.json.',
+  calls: 'Tool calls AI clients made to RefDex, with the amount of text returned (about 4 characters per token).',
 } as const;
 type Topic = keyof typeof EXPLAIN;
 
@@ -34,6 +40,8 @@ export interface ReportState {
   watching: boolean;
   watchSetting: boolean;
   dbBytes: number | undefined;
+  clients?: ClientState;
+  usage?: ClientUsage[];
 }
 
 /**
@@ -68,12 +76,13 @@ export class StatusReport implements vscode.Disposable {
       vscode.commands.registerCommand(HOVER_OPEN_DB, () => this.runFromHover('refdex.openDatabase')),
       vscode.commands.registerCommand(HOVER_SETTINGS, () => this.runFromHover('workbench.action.openSettings', '@ext:danielonnet.refdex')),
       vscode.commands.registerCommand(HOVER_TOGGLE_WATCH, () => this.runFromHover('refdex.toggleWatch')),
+      vscode.commands.registerCommand(HOVER_CONNECT_CLAUDE, () => this.runFromHover('refdex.connectClaudeCode')),
       vscode.commands.registerCommand(HOVER_EXPLAIN, (topic: Topic) => vscode.window.showInformationMessage(`RefDex: ${EXPLAIN[topic] ?? ''}`)),
     );
   }
 
-  update(state: ReportState): void {
-    this.state = state;
+  update(state: Partial<ReportState>): void {
+    this.state = { ...this.state, ...state };
     this.error = undefined;
     this.item.text = IDLE;
     this.item.tooltip = this.report();
@@ -104,7 +113,7 @@ export class StatusReport implements vscode.Disposable {
     const md = new vscode.MarkdownString(undefined, true);
     md.supportHtml = true;
     // Links are what a hover has instead of buttons; only RefDex's own commands are trusted.
-    md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_SEARCH, HOVER_OPEN_DB, HOVER_SETTINGS, HOVER_TOGGLE_WATCH, HOVER_EXPLAIN] };
+    md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_SEARCH, HOVER_OPEN_DB, HOVER_SETTINGS, HOVER_TOGGLE_WATCH, HOVER_CONNECT_CLAUDE, HOVER_EXPLAIN] };
     return md;
   }
 
@@ -147,6 +156,8 @@ export class StatusReport implements vscode.Disposable {
     md.appendMarkdown(bar(share));
     md.appendMarkdown('---\n\n');
 
+    this.appendClients(md);
+
     // Settings-style rows: name and ⓘ on the left, state on the right, an action link below.
     md.appendMarkdown(row(`<strong>Watch for changes</strong> ${info('watch')}`, grey(watching ? 'Enabled' : watchSetting ? 'Starting…' : 'Disabled')));
     md.appendMarkdown(link(watchSetting ? 'Disable?' : 'Enable?', HOVER_TOGGLE_WATCH));
@@ -157,6 +168,42 @@ export class StatusReport implements vscode.Disposable {
     md.appendMarkdown(row(`<strong>Regenerate index</strong> ${info('regenerate')}`, grey('From scratch')));
     md.appendMarkdown(link('Regenerate?', HOVER_GENERATE));
     return md;
+  }
+
+  /** One row per AI client: whether it is connected, and how much it used RefDex. */
+  private appendClients(md: vscode.MarkdownString): void {
+    const { clients, usage = [] } = this.state;
+    if (!clients) {
+      return;
+    }
+    const used = (name: string) => {
+      const u = usage.find((x) => x.name === name);
+      return u ? ` · ${count(u.calls, 'call')}` : '';
+    };
+    const copilot = clients.copilot.registered ? `Connected${used('Copilot')}` : clients.copilot.installed ? 'Not registered' : 'Not installed';
+    md.appendMarkdown(row(`<strong>Copilot</strong> ${info('copilot')}`, grey(copilot)));
+    md.appendMarkdown('---\n\n');
+    const claude = clients.claude.scope
+      ? `Connected${clients.claude.scope === 'project' ? ' (.mcp.json)' : ''}${used('Claude Code')}`
+      : clients.claude.installed || clients.claude.cliFound ? 'Not connected' : 'Not installed';
+    md.appendMarkdown(row(`<strong>Claude Code</strong> ${info('claude')}`, grey(claude)));
+    if (!clients.claude.scope && (clients.claude.installed || clients.claude.cliFound)) {
+      md.appendMarkdown(link('Connect?', HOVER_CONNECT_CLAUDE));
+    }
+    md.appendMarkdown('---\n\n');
+    // Other MCP clients that found RefDex on their own (e.g. configured by hand).
+    for (const u of usage.filter((x) => x.name !== 'Copilot' && x.name !== 'Claude Code')) {
+      md.appendMarkdown(row(`<strong>${escapeHtml(u.name)}</strong>`, grey(`Connected · ${count(u.calls, 'call')}`)));
+      md.appendMarkdown('---\n\n');
+    }
+    if (usage.length) {
+      const calls = usage.reduce((n, u) => n + u.calls, 0);
+      const today = usage.reduce((n, u) => n + u.callsToday, 0);
+      const tokens = Math.round(usage.reduce((n, u) => n + u.chars, 0) / 4);
+      md.appendMarkdown(row(`<strong>Tool calls</strong> ${info('calls')}`, grey(`${today.toLocaleString()} today`)));
+      md.appendMarkdown(headline(calls.toLocaleString(), `calls · ~${tokens.toLocaleString()} tokens returned`));
+      md.appendMarkdown('---\n\n');
+    }
   }
 
   /**

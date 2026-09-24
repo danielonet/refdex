@@ -7,7 +7,7 @@ import type { IndexDb, ImportRow } from './db.ts';
 import { languageForPath, type LanguageId } from './languages.ts';
 import type { ImportDecl } from './model.ts';
 import type { TreeSitter } from './parser.ts';
-import { isConfigFile, Workspace } from './workspace.ts';
+import { isConfigFile, Workspace, type WorkspaceOptions } from './workspace.ts';
 
 export interface IndexSummary {
   /** Files parsed and written in this run. */
@@ -34,15 +34,15 @@ export class Indexer {
   readonly root: string;
   private readonly db: IndexDb;
   private readonly treeSitter: TreeSitter;
-  private readonly exclude: readonly string[];
+  private readonly options: WorkspaceOptions;
   private workspace?: Workspace;
 
-  /** `exclude`: extra gitignore-style patterns on top of .gitignore and the built-in folder list. */
-  constructor(db: IndexDb, treeSitter: TreeSitter, root: string, exclude: readonly string[] = []) {
+  /** `options`: what to index on top of .gitignore and the built-in folder list. */
+  constructor(db: IndexDb, treeSitter: TreeSitter, root: string, options: WorkspaceOptions = {}) {
     this.db = db;
     this.treeSitter = treeSitter;
     this.root = root;
-    this.exclude = exclude;
+    this.options = options;
   }
 
   /** Drops the whole index and builds it again from scratch. */
@@ -55,7 +55,7 @@ export class Indexer {
   /** Full scan: indexes new and changed files, drops files that are gone or now ignored. */
   async syncAll(): Promise<IndexSummary> {
     const started = performance.now();
-    this.workspace = await Workspace.scan(this.root, this.exclude);
+    this.workspace = await Workspace.scan(this.root, this.options);
     const known = this.db.fileHashes();
     const paths = [...this.workspace.files].sort();
     const result = await this.indexFiles(paths, known);

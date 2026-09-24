@@ -45,7 +45,7 @@ Index a project, then point an MCP client at `refdex mcp`, for example in Claude
 node packages/server/dist/refdex.cjs index --root /path/to/project   # writes /path/to/project/.refdex/index.db
 ```
 
-Tools: `search_symbols`, `get_file_outline`, `get_symbol_source`, `find_references`. The VS Code extension will register this automatically (Phase 3).
+Tools: `search_symbols`, `get_file_outline`, `get_symbol_source`, `find_references`. In VS Code you don't need this by hand: the extension registers RefDex with Copilot automatically, and "RefDex: Connect Claude Code…" adds it to Claude Code for the open project.
 
 To run the extension, open `packages/vscode` in VS Code and press F5.
 

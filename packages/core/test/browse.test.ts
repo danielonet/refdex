@@ -37,9 +37,21 @@ describe('database browser', () => {
     }
   });
 
+  it('honours include patterns and enabled languages', async () => {
+    const ts = await TreeSitter.create();
+    const onlyShop = new IndexDb(':memory:');
+    await new Indexer(onlyShop, ts, join(FIXTURES, 'python'), { include: ['src/shop/*.py'] }).syncAll();
+    assert.deepEqual([...onlyShop.fileHashes().keys()].map((p) => p.split('/fixtures/python/')[1]).sort(),
+      ['src/shop/__init__.py', 'src/shop/orders.py', 'src/shop/pricing.py', 'src/shop/utils.py']);
+    const noJava = new IndexDb(':memory:');
+    await new Indexer(noJava, ts, FIXTURES, { languages: ['python', 'typescript'] }).syncAll();
+    const langs = new Set(noJava.stats().byLanguage.map((l) => l.language));
+    assert.deepEqual([...langs].sort(), ['python', 'tsx', 'typescript']);
+  });
+
   it('rebuilds from scratch and honours exclude patterns', async () => {
     const db = new IndexDb(':memory:');
-    const indexer = new Indexer(db, await TreeSitter.create(), join(FIXTURES, 'python'), ['tests/', 'utils.py']);
+    const indexer = new Indexer(db, await TreeSitter.create(), join(FIXTURES, 'python'), { exclude: ['tests/', 'utils.py'] });
     const first = await indexer.syncAll();
     const paths = [...db.fileHashes().keys()];
     assert.ok(!paths.some((p) => p.includes('/tests/') || p.endsWith('utils.py')), paths.join());

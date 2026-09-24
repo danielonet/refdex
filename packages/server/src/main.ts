@@ -36,6 +36,8 @@ Options:
   --json        machine-readable output
   --limit <n>   maximum search results (default: 20)
   --exclude <pattern>  gitignore-style pattern to leave out (repeatable; serve and index)
+  --include <pattern>  only index files matching these gitignore-style patterns (repeatable)
+  --language <id>      only index these languages: python, typescript, java, csharp (repeatable)
   --no-watch    serve: do not watch files for changes
 Environment: REFDEX_ROOT and REFDEX_DB stand in for --root and --db.`;
 
@@ -50,6 +52,8 @@ async function main(argv: string[]): Promise<number> {
       limit: { type: 'string', default: '20' },
       version: { type: 'boolean', default: false },
       exclude: { type: 'string', multiple: true, default: [] },
+      include: { type: 'string', multiple: true, default: [] },
+      language: { type: 'string', multiple: true, default: [] },
       watch: { type: 'boolean', default: true },
     },
     allowNegative: true,
@@ -64,6 +68,7 @@ async function main(argv: string[]): Promise<number> {
   opts.db ??= process.env.REFDEX_DB || (opts.root ? join(resolve(opts.root), '.refdex', 'index.db') : 'refdex.db');
   const print = (json: unknown, text: () => string) => console.log(opts.json ? JSON.stringify(json) : text());
   if (command === 'serve' || command === 'index') mkdirSync(dirname(resolve(opts.db)), { recursive: true });
+  const workspaceOptions = () => ({ exclude: opts.exclude, include: opts.include, languages: opts.language });
   const root = () => {
     if (!opts.root) throw new Error(`${command} needs --root <dir>`);
     return resolve(opts.root);
@@ -71,7 +76,7 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case 'serve':
-      await serve(root(), resolve(opts.db), { exclude: opts.exclude, watch: opts.watch });
+      await serve(root(), resolve(opts.db), { ...workspaceOptions(), watch: opts.watch });
       return -1; // keeps running until stdin closes
     case 'mcp':
       await serveMcp(root(), resolve(opts.db), VERSION);
@@ -79,7 +84,7 @@ async function main(argv: string[]): Promise<number> {
     case 'selftest':
       return selftest();
     case 'index': {
-      const indexer = new Indexer(new IndexDb(opts.db), await TreeSitter.create(wasmLoader()), root(), opts.exclude);
+      const indexer = new Indexer(new IndexDb(opts.db), await TreeSitter.create(wasmLoader()), root(), workspaceOptions());
       const s = await indexer.syncAll();
       print(s, () =>
         `indexed ${s.indexed} files (${s.unchanged} unchanged, ${s.removed} removed, ${s.failed.length} failed) in ${s.ms} ms; ` +

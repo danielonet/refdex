@@ -188,13 +188,27 @@ Phase 2 notes (2026-09-24):
 
 ### Phase 3: VS Code extension and client detection
 
-- [ ] VS Code extension launches the daemon and shows status
-- [ ] Detect Copilot Chat and Claude Code extensions
-- [ ] Register server for Copilot with `registerMcpServerDefinitionProvider` when Copilot is present
-- [ ] Command that writes the Claude Code `.mcp.json` entry when Claude Code is present
-- [ ] Log MCP `clientInfo` and tool calls per client
-- [ ] Status bar indicator and "Reindex workspace" command
-- [ ] Settings: include/exclude globs, enabled languages
+- [x] VS Code extension launches the daemon and shows status
+- [x] Detect Copilot Chat and Claude Code extensions
+- [x] Register server for Copilot with `registerMcpServerDefinitionProvider` when Copilot is present
+- [x] Command that writes the Claude Code `.mcp.json` entry when Claude Code is present
+- [x] Log MCP `clientInfo` and tool calls per client
+- [x] Status bar indicator and "Reindex workspace" command
+- [x] Settings: include/exclude globs, enabled languages
+
+Phase 3 notes (2026-09-24):
+
+- **MCP command:** AI clients start `<VS Code runtime> dist/daemon/refdex.cjs mcp --root <folder> --db <index>` with `ELECTRON_RUN_AS_NODE=1`, so no Node install is needed. The index stays in VS Code's per-workspace storage.
+- **Copilot:** `GitHub.copilot-chat` (built into VS Code 1.137 as 0.65) is detected, and RefDex registers through `vscode.lm.registerMcpServerDefinitionProvider` (`contributes.mcpServerDefinitionProviders`: `refdex.mcp`).
+- **Claude Code:** "RefDex: Connect Claude Code…" offers two scopes, and nothing is written unless the user picks one:
+  - *This project, only for me* (default): `claude mcp add-json --scope local`, using the `claude` CLI on PATH or the one bundled with the Claude Code extension.
+  - *.mcp.json*: merged into the root file, keeping other servers. It holds machine paths, so it is not meant to be committed.
+- **Offer and upkeep:** after the first index, if Claude Code is installed and not connected, RefDex offers to connect once per workspace. When an extension update moves the bundled daemon, an existing entry is rewritten.
+- **Verified:** Claude Code 2.1.281 reports the local entry as "✔ Connected".
+- **Usage log:** the MCP server appends one JSON line per tool call (client name and version from `initialize`, tool, ms, characters returned) to `mcp-usage.jsonl` beside the index, rotated at 2 MB. The extension watches it: the status report shows calls per client and approximate tokens returned, and the About view shows each client's state. This log also feeds the Phase 5 token measurement.
+- **Settings:** `refdex.include` (gitignore-style allow list) and `refdex.languages` join `refdex.exclude` and `refdex.watch`; any change restarts the daemon.
+- **Deviation:** the plan's `client_usage` table became a JSONL file, because the MCP server's database connection is read-only.
+- **Open:** Copilot's `clientInfo` name is assumed to be "Visual Studio Code" (VS Code's product name) until a real agent-mode session confirms it.
 
 ### Phase 4: Graph and ranking
 

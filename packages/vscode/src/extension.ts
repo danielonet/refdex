@@ -1,13 +1,25 @@
+import { watch } from 'node:fs';
+import { dirname } from 'node:path';
 import * as vscode from 'vscode';
 import { AboutViewProvider } from './aboutView';
+import {
+  CLAUDE_CODE_ID, ClaudeCodeSetup, COPILOT_CHAT_ID, isInstalled, registerCopilotProvider, serverCommand,
+  type ClaudeScope, type ClientState,
+} from './clients';
 import { Daemon, type DaemonOptions, type IndexStats } from './daemon';
 import { DatabaseBrowser } from './databaseBrowser';
 import { exportCsv, openDatabase } from './openDatabase';
 import { StatusReport } from './statusReport';
+import { readUsage } from './usage';
 
 function options(): DaemonOptions {
   const cfg = vscode.workspace.getConfiguration('refdex');
-  return { exclude: cfg.get<string[]>('exclude', []), watch: cfg.get<boolean>('watch', true) };
+  return {
+    exclude: cfg.get<string[]>('exclude', []),
+    include: cfg.get<string[]>('include', []),
+    languages: cfg.get<string[]>('languages', []),
+    watch: cfg.get<boolean>('watch', true),
+  };
 }
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -24,15 +36,49 @@ export async function activate(context: vscode.ExtensionContext) {
     const needFolder = () => vscode.window.showWarningMessage('RefDex: open a folder to index it.');
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider(AboutViewProvider.viewType, about),
-      ...['refdex.generateIndex', 'refdex.updateIndex', 'refdex.searchSymbols', 'refdex.openDatabase', 'refdex.browseDatabase', 'refdex.exportCsv']
+      ...['refdex.generateIndex', 'refdex.updateIndex', 'refdex.searchSymbols', 'refdex.openDatabase', 'refdex.browseDatabase', 'refdex.exportCsv', 'refdex.connectClaudeCode']
         .map((id) => vscode.commands.registerCommand(id, needFolder)),
     );
     return;
   }
   await vscode.workspace.fs.createDirectory(storage);
-  const daemon = new Daemon(context.extensionUri, root, vscode.Uri.joinPath(storage, 'index.db').fsPath, options(), log);
+  const dbPath = vscode.Uri.joinPath(storage, 'index.db').fsPath;
+  const daemon = new Daemon(context.extensionUri, root, dbPath, options(), log);
   const about = new AboutViewProvider(context, daemon);
   context.subscriptions.push(daemon, vscode.window.registerWebviewViewProvider(AboutViewProvider.viewType, about));
+
+  // ---- AI clients: RefDex's MCP server for Copilot (agent mode) and Claude Code ----
+  const version = (context.extension.packageJSON as { version: string }).version;
+  const mcpCommand = () => serverCommand(context.extensionUri, root, dbPath);
+  const copilot = isInstalled(COPILOT_CHAT_ID) ? registerCopilotProvider(mcpCommand, version) : undefined;
+  if (copilot) {
+    context.subscriptions.push(copilot);
+    log.appendLine('Copilot Chat found: registered RefDex as an MCP server for agent mode');
+  }
+  const claude = new ClaudeCodeSetup(root, log);
+  const clientState = async (): Promise<ClientState> => ({
+    copilot: { installed: !!copilot || isInstalled(COPILOT_CHAT_ID), registered: !!copilot },
+    claude: { installed: isInstalled(CLAUDE_CODE_ID), scope: (await claude.current())?.scope, cliFound: !!claude.cli() },
+  });
+  const refreshClients = async () => {
+    const [clients, usage] = await Promise.all([clientState(), readUsage(dbPath)]);
+    about.clients = clients;
+    status.update({ clients, usage });
+    void about.refresh();
+  };
+  // Tool calls are logged by the MCP server next to the index; show them as they happen.
+  let usageTimer: NodeJS.Timeout | undefined;
+  try {
+    const usageWatcher = watch(dirname(dbPath), (_event, name) => {
+      if (name?.toString().startsWith('mcp-usage')) {
+        clearTimeout(usageTimer);
+        usageTimer = setTimeout(() => void refreshClients(), 1000);
+      }
+    });
+    context.subscriptions.push({ dispose: () => usageWatcher.close() });
+  } catch (e) {
+    log.appendLine(`cannot watch MCP usage: ${e}`);
+  }
 
   let stats: IndexStats | undefined;
   const showStats = async (fresh?: IndexStats) => {
@@ -101,6 +147,7 @@ export async function activate(context: vscode.ExtensionContext) {
       const target = inspected?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
       await cfg.update('watch', !options().watch, target);
     }),
+    vscode.commands.registerCommand('refdex.connectClaudeCode', () => connectClaudeCode(claude, mcpCommand, refreshClients)),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('refdex')) {
         log.appendLine('settings changed; restarting the daemon');
@@ -112,8 +159,87 @@ export async function activate(context: vscode.ExtensionContext) {
 
   daemon.start();
   await showStats();
+  // Keep an existing Claude Code entry pointing at this version's files, then show client state.
+  await claude.refreshIfStale(mcpCommand());
+  await refreshClients();
+  context.subscriptions.push(
+    daemon.onEvent((e) => {
+      if (e.event === 'indexed' && e.stats.files) {
+        void offerClaudeCode(context, claude, mcpCommand, refreshClients);
+      }
+    }),
+  );
+  if (stats?.files) {
+    void offerClaudeCode(context, claude, mcpCommand, refreshClients);
+  }
   // For the integration tests.
-  return { daemon };
+  return { daemon, clientState };
+}
+
+/** Adds (or removes) RefDex in Claude Code's MCP settings for this project, in the scope the user picks. */
+async function connectClaudeCode(claude: ClaudeCodeSetup, cmd: () => ReturnType<typeof serverCommand>, refresh: () => Promise<void>) {
+  const current = await claude.current();
+  type Item = vscode.QuickPickItem & { scope?: ClaudeScope; disconnect?: boolean };
+  const items: Item[] = [
+    {
+      label: '$(lock) This project, only for me',
+      description: current?.scope === 'local' ? 'current' : 'recommended',
+      detail: 'Adds RefDex to your Claude Code settings for this folder. Nothing is written to the repository.',
+      scope: 'local',
+    },
+    {
+      label: '$(repo) This project, in .mcp.json',
+      description: current?.scope === 'project' ? 'current' : undefined,
+      detail: 'Writes .mcp.json in the workspace root. It holds paths on this machine, so it is not meant to be committed.',
+      scope: 'project',
+    },
+    ...(current ? [{ label: '$(trash) Disconnect', detail: `Remove RefDex from Claude Code (${current.scope === 'local' ? 'your settings' : '.mcp.json'})`, disconnect: true }] : []),
+  ];
+  const picked = await vscode.window.showQuickPick(items, { title: 'Connect RefDex to Claude Code', placeHolder: 'Where should Claude Code find RefDex?' });
+  if (!picked) {
+    return;
+  }
+  try {
+    if (picked.disconnect && current) {
+      await claude.disconnect(current.scope);
+      void vscode.window.showInformationMessage('RefDex: disconnected from Claude Code.');
+    } else if (picked.scope) {
+      if (current && current.scope !== picked.scope) {
+        await claude.disconnect(current.scope);
+      }
+      await claude.connect(picked.scope, cmd());
+      void vscode.window.showInformationMessage(
+        `RefDex: connected to Claude Code for this project. Start a new Claude Code session (or run /mcp) to use it` +
+          (picked.scope === 'project' ? '; Claude Code asks once to approve servers from .mcp.json.' : '.'),
+      );
+    }
+  } catch (e) {
+    void vscode.window.showErrorMessage(`RefDex: could not update Claude Code: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    await refresh();
+  }
+}
+
+/** After the first index, offer once per workspace to connect Claude Code if it is installed. */
+async function offerClaudeCode(
+  context: vscode.ExtensionContext,
+  claude: ClaudeCodeSetup,
+  cmd: () => ReturnType<typeof serverCommand>,
+  refresh: () => Promise<void>,
+) {
+  const key = 'refdex.claudeOffer';
+  if (context.workspaceState.get(key) || !(isInstalled(CLAUDE_CODE_ID) || claude.cli()) || (await claude.current())) {
+    return;
+  }
+  await context.workspaceState.update(key, 'shown');
+  const choice = await vscode.window.showInformationMessage(
+    'RefDex: connect the index to Claude Code, so it can look up code instead of reading whole files?',
+    'Connect',
+    'Not now',
+  );
+  if (choice === 'Connect') {
+    await connectClaudeCode(claude, cmd, refresh);
+  }
 }
 
 async function searchSymbols(daemon: Daemon, log: vscode.OutputChannel) {

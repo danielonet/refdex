@@ -53,6 +53,11 @@
         "category": "RefDex"
       },
       {
+        "command": "refdex.connectClaudeCode",
+        "title": "Connect Claude Code\u2026",
+        "category": "RefDex"
+      },
+      {
         "command": "refdex.exportCsv",
         "title": "Export Table to CSV\u2026",
         "category": "RefDex"
@@ -122,6 +127,14 @@
     "configuration": {
       "title": "RefDex",
       "properties": {
+        "refdex.include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "When set, only paths matching one of these patterns are indexed (`.gitignore` syntax, relative to the workspace root), for example `src/` or `services/**/*.cs`. Empty means everything."
+        },
         "refdex.exclude": {
           "type": "array",
           "items": {
@@ -134,6 +147,27 @@
           "type": "boolean",
           "default": true,
           "description": "Keep the index up to date automatically when files change. When off, use Generate / Regenerate Index to update it."
+        },
+        "refdex.languages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "python",
+              "typescript",
+              "java",
+              "csharp"
+            ],
+            "enumDescriptions": [
+              "Python (.py, .pyi)",
+              "TypeScript (.ts, .tsx, .mts, .cts)",
+              "Java (.java)",
+              "C# (.cs)"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Languages to index. Empty means all supported languages."
         }
       }
     },
@@ -145,7 +179,13 @@
           "fontCharacter": "\\E001"
         }
       }
-    }
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "refdex.mcp",
+        "label": "RefDex"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

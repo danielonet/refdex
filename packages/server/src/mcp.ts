@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as z from 'zod';
 import { RefdexTools } from './tools.ts';
+import { UsageLog } from './usage.ts';
 
 const INSTRUCTIONS = `RefDex is a method-level index of this workspace's Python, TypeScript, Java and C# code.
 Use it to find and read code instead of opening whole files:
@@ -19,7 +20,27 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
   const tools = new RefdexTools(root, dbPath);
   const server = new McpServer({ name: 'refdex', title: 'RefDex code index', version }, { instructions: INSTRUCTIONS });
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
-  const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
+  const usage = new UsageLog(dbPath);
+  let announced = false;
+  /** Runs a tool, logs the call with the client's name, and wraps the text as MCP content. */
+  const run = async (tool: string, fn: () => Promise<string>) => {
+    const started = performance.now();
+    const text = await fn();
+    const client = server.server.getClientVersion();
+    if (!announced) {
+      announced = true;
+      process.stderr.write(`refdex mcp: serving ${client?.name ?? 'unknown client'} ${client?.version ?? ''} for ${root}\n`);
+    }
+    void usage.record({
+      t: new Date().toISOString(),
+      client: client?.name ?? 'unknown',
+      clientVersion: client?.version,
+      tool,
+      ms: Math.round(performance.now() - started),
+      chars: text.length,
+    });
+    return { content: [{ type: 'text' as const, text }] };
+  };
 
   server.registerTool(
     'search_symbols',
@@ -39,7 +60,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    async (args) => text(await tools.searchSymbols(args)),
+    (args) => run('search_symbols', () => tools.searchSymbols(args)),
   );
 
   server.registerTool(
@@ -55,7 +76,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    async (args) => text(await tools.getFileOutline(args)),
+    (args) => run('get_file_outline', () => tools.getFileOutline(args)),
   );
 
   server.registerTool(
@@ -74,7 +95,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    async (args) => text(await tools.getSymbolSource(args)),
+    (args) => run('get_symbol_source', () => tools.getSymbolSource(args)),
   );
 
   server.registerTool(
@@ -90,7 +111,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    async (args) => text(await tools.findReferences(args)),
+    (args) => run('find_references', () => tools.findReferences(args)),
   );
 
   const transport = new StdioServerTransport();

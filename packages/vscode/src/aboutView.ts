@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import * as vscode from 'vscode';
+import type { ClientState } from './clients';
 import type { Daemon, DaemonInfo, IndexStats } from './daemon';
 import { escapeHtml, formatBytes, getNonce, LANGUAGE_NAMES } from './webviewUtil';
 
@@ -12,6 +13,8 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = 'refdex.about';
   private view: vscode.WebviewView | undefined;
   private stats: IndexStats | undefined;
+  /** Set by the extension once AI clients have been detected. */
+  clients: ClientState | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -76,13 +79,21 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
     const pkg = this.context.extension.packageJSON as { version?: string; description?: string };
     const cfg = vscode.workspace.getConfiguration('refdex');
     const exclude = cfg.get<string[]>('exclude', []);
+    const include = cfg.get<string[]>('include', []);
+    const enabled = cfg.get<string[]>('languages', []);
     const watch = cfg.get<boolean>('watch', true);
     const indexed = !!this.stats?.files;
     const folder = this.daemon ? basename(this.daemon.root) : undefined;
     const nonce = getNonce();
     const row = (key: string, value: string, title?: string) =>
       `<tr><td class="key">${escapeHtml(key)}</td><td class="val"${title ? ` title="${escapeHtml(title)}"` : ''}>${value}</td></tr>`;
-    const languages = [...new Set(Object.values(LANGUAGE_NAMES))].join(', ');
+    const languages = enabled.length
+      ? enabled.map((l) => LANGUAGE_NAMES[l] ?? l).join(', ')
+      : [...new Set(Object.values(LANGUAGE_NAMES))].filter((l) => l !== 'TSX').join(', ');
+    const c = this.clients;
+    const copilot = !c ? '—' : c.copilot.registered ? 'connected' : c.copilot.installed ? 'not registered' : 'not installed';
+    const claude = !c ? '—' : c.claude.scope ? `connected (${c.claude.scope === 'local' ? 'this project, private' : '.mcp.json'})`
+      : c.claude.installed || c.claude.cliFound ? 'not connected' : 'not installed';
     const daemonState = !this.daemon
       ? 'not started (no folder open)'
       : info
@@ -127,16 +138,24 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
     ${row('Workspace', escapeHtml(folder ?? '—'), this.daemon?.root)}
     ${row('Languages', escapeHtml(languages))}
     ${row('Watch for changes', watch ? 'on' : 'off')}
+    ${row('Include', include.length ? include.map(escapeHtml).join('<br>') : 'everything')}
     ${row('Exclude', exclude.length ? exclude.map(escapeHtml).join('<br>') : '— (.gitignore only)')}
     ${row('Database', this.daemon ? `index.db${info ? ` (${formatBytes(info.dbBytes)})` : ''}` : '—', this.daemon?.dbPath)}
     ${row('Index', indexed ? 'built' : 'not built yet')}
     ${row('Daemon', daemonState)}
   </table>
 
+  <h3>AI clients</h3>
+  <table>
+    ${row('Copilot', escapeHtml(copilot))}
+    ${row('Claude Code', escapeHtml(claude))}
+  </table>
+
   <h3>Actions</h3>
   <button data-command="refdex.generateIndex">${indexed ? 'Regenerate Index' : 'Generate Index'}</button>
   <button class="secondary" data-command="refdex.openDatabase"${indexed ? '' : ' disabled'}>Open Database…</button>
   <button class="secondary" data-command="refdex.searchSymbols"${indexed ? '' : ' disabled'}>Search Symbols</button>
+  <button class="secondary" data-command="refdex.connectClaudeCode"${c && (c.claude.installed || c.claude.cliFound) ? '' : ' disabled'}>${c?.claude.scope ? 'Reconnect Claude Code…' : 'Connect Claude Code…'}</button>
   <button class="secondary" data-command="workbench.action.openSettings" data-args='["@ext:danielonnet.refdex"]'>Open Settings</button>
   <button class="secondary" data-command="refdex.showLog">Show Log</button>
   <button class="secondary" id="readme">View README</button>

@@ -1,12 +1,12 @@
 import * as sea from 'node:sea';
 import { parentPort, Worker, workerData } from 'node:worker_threads';
-import { IndexDb, Indexer, TreeSitter, type IndexSummary } from '@refdex/core';
+import { IndexDb, Indexer, TreeSitter, type IndexSummary, type WorkspaceOptions } from '@refdex/core';
 import { wasmLoader } from './wasm.ts';
 
 export interface IndexWorkerData {
   root: string;
   dbPath: string;
-  exclude: string[];
+  options: WorkspaceOptions;
 }
 
 export type WorkerRequest = { type: 'sync'; full: boolean; rebuild: boolean; paths: string[] };
@@ -26,9 +26,9 @@ export function startIndexWorker(data: IndexWorkerData): Worker {
 
 /** Worker thread body: owns the write connection, the parser and the indexer. */
 export async function runIndexWorker(): Promise<void> {
-  const { root, dbPath, exclude } = workerData as IndexWorkerData;
+  const { root, dbPath, options } = workerData as IndexWorkerData;
   const db = new IndexDb(dbPath);
-  const indexer = new Indexer(db, await TreeSitter.create(wasmLoader()), root, exclude);
+  const indexer = new Indexer(db, await TreeSitter.create(wasmLoader()), root, options);
   parentPort!.on('message', async (req: WorkerRequest) => {
     try {
       const summary = req.rebuild ? await indexer.rebuild() : req.full ? await indexer.syncAll() : await indexer.syncPaths(req.paths);
