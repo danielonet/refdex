@@ -52,10 +52,34 @@ export interface ImportDecl {
   line: number;
 }
 
+/** Edge types in the `edges` table. */
+export type EdgeType = 'calls' | 'extends' | 'implements' | 'references';
+
+/**
+ * A use of a name inside a file: a call (`f()`, `obj.m()`, `new C()`), a base type or a type
+ * annotation. Resolved to a symbol after indexing, so only the name and its qualifier are known here.
+ */
+export interface ExtractedReference {
+  /**
+   * `extends` covers every base type; resolution turns it into `implements` when the target is an
+   * interface (C# base lists can't tell them apart syntactically).
+   */
+  type: EdgeType;
+  name: string;
+  /** What the name was accessed through, as written: `this`, `self`, `super`, `ns`, `a.b`, `Util`. */
+  qualifier?: string;
+  /** `new C()`: the target is a type. */
+  instantiates: boolean;
+  line: number;
+  /** Innermost enclosing symbol; undefined at module level. */
+  from?: ExtractedSymbol;
+}
+
 export interface ParsedFile {
   language: LanguageId;
   /** Parent-first order. */
   symbols: ExtractedSymbol[];
   imports: ImportDecl[];
+  references: ExtractedReference[];
   hasErrors: boolean;
 }

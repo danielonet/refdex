@@ -25,6 +25,7 @@ suite('RefDex extension', () => {
     const stats = await daemon.stats();
     assert.ok(stats.files >= 7, JSON.stringify(stats));
     assert.ok(stats.resolvedImports > 0);
+    assert.ok(stats.resolvedEdges > 0 && stats.resolvedEdges <= stats.edges);
     const hits = await daemon.search('OrderMod');
     assert.strictEqual(hits[0]?.qualified_name, 'src/models/order:OrderModel');
   });

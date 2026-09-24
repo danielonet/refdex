@@ -88,7 +88,8 @@ async function main(argv: string[]): Promise<number> {
       const s = await indexer.syncAll();
       print(s, () =>
         `indexed ${s.indexed} files (${s.unchanged} unchanged, ${s.removed} removed, ${s.failed.length} failed) in ${s.ms} ms; ` +
-        `${s.files} files, ${s.symbols} symbols; imports: ${s.importsResolved} resolved, ${s.importsUnresolved} unresolved (external)`);
+        `${s.files} files, ${s.symbols} symbols; imports: ${s.importsResolved} resolved, ${s.importsUnresolved} unresolved (external); ` +
+        `uses: ${s.edgesResolved} linked, ${s.edgesUnresolved} unlinked (library, dynamic or ambiguous)`);
       return 0;
     }
     case 'search': {

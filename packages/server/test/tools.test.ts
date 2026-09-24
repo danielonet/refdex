@@ -76,6 +76,34 @@ describe('MCP tools: typescript', () => {
     // Not the declaration itself.
     assert.doesNotMatch(out, /order\.ts:8:/);
   });
+
+  it('find_references lists linked uses with their caller before name matches', async () => {
+    const out = await t.tools.findReferences({ qualified_name: 'src/models/order:OrderModel' });
+    assert.match(out, /1 use linked by the index.*:\nsrc\/services\/orderService\.ts:13: return new OrderModel\(\); {2}\[calls in src\/services\/orderService:OrderService\.find\]\n2 other lines naming "OrderModel"/s);
+    const iface = await t.tools.findReferences({ qualified_name: 'src/models/order:Order' });
+    assert.match(iface, /src\/models\/order\.ts:8: export class OrderModel implements Order \{ {2}\[implements in src\/models\/order:OrderModel\]/);
+  });
+
+  it('get_symbol_source with_callees lists what the symbol calls', async () => {
+    const out = await t.tools.getSymbolSource({ qualified_name: 'src/services/orderService:OrderService.find', with_callees: true });
+    assert.match(out, /\/\/ calls 1 indexed symbol:\nclass src\/models\/order:OrderModel {2}src\/models\/order\.ts:8-15\n {2}class OrderModel implements Order/);
+    assert.doesNotMatch(await t.tools.getSymbolSource({ qualified_name: 'src/services/orderService:OrderService.find' }), /\/\/ calls/);
+  });
+
+  it('get_repo_map ranks the most used symbols first within the budget', async () => {
+    const out = await t.tools.getRepoMap({});
+    assert.match(out, /^\[RefDex index: .*\]\nRepo map: \d+ of \d+ symbols in \d+ files, the most used first \(PageRank over \d+ linked/);
+    // Order is used by OrderModel and OrderService: its file comes first, with the interface on top.
+    assert.match(out, /files in rank order.*\nsrc\/models\/order\.ts\n {2}2-6 interface Order\n/is);
+    // Unused properties are left out; used types are kept.
+    assert.doesNotMatch(out, /property lines/);
+    assert.match(out, /8-15 class OrderModel implements Order/);
+
+    const small = await t.tools.getRepoMap({ token_budget: 100, path: 'src/services' });
+    assert.match(small, /Repo map of src\/services: /);
+    assert.doesNotMatch(small, /src\/models/);
+    assert.ok(small.split('\n').slice(2).join('\n').length <= 100 * 4);
+  });
 });
 
 describe('MCP tools: python, java, csharp', () => {

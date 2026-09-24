@@ -9,6 +9,8 @@ export interface IndexSummary {
   failed: { path: string; error: string }[];
   importsResolved: number;
   importsUnresolved: number;
+  edgesResolved: number;
+  edgesUnresolved: number;
   files: number;
   symbols: number;
   ms: number;
@@ -19,6 +21,8 @@ export interface IndexStats {
   symbols: number;
   imports: number;
   resolvedImports: number;
+  edges: number;
+  resolvedEdges: number;
   byLanguage: { language: string; files: number; symbols: number }[];
   indexedAt: string | null;
 }

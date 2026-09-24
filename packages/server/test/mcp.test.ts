@@ -30,10 +30,10 @@ describe('refdex mcp over stdio', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('announces instructions and four read-only tools', async () => {
+  it('announces instructions and five read-only tools', async () => {
     assert.match(client.getInstructions() ?? '', /search_symbols/);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['find_references', 'get_file_outline', 'get_symbol_source', 'search_symbols']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['find_references', 'get_file_outline', 'get_repo_map', 'get_symbol_source', 'search_symbols']);
     assert.ok(tools.every((t) => t.annotations?.readOnlyHint));
     assert.deepEqual(tools.find((t) => t.name === 'search_symbols')?.inputSchema.required, ['query']);
   });

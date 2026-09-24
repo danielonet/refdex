@@ -11,6 +11,7 @@ export interface LoadedLanguage {
   language: Language;
   adapter: LanguageAdapter;
   definitions: Query;
+  references: Query;
 }
 
 /** Owns the tree-sitter runtime and lazily loads one grammar (and its adapter's query) per language. */
@@ -34,7 +35,7 @@ export class TreeSitter {
       loaded = (async () => {
         const language = await Language.load(await this.loadWasm(LANGUAGES[id].wasm));
         const adapter = adapterFor(id);
-        return { id, language, adapter, definitions: new Query(language, adapter.definitions) };
+        return { id, language, adapter, definitions: new Query(language, adapter.definitions), references: new Query(language, adapter.references) };
       })();
       this.languages.set(id, loaded);
     }
@@ -54,7 +55,7 @@ export class TreeSitter {
     const { tree, lang } = await this.parseTree(id, source);
     try {
       const module = workspace ? lang.adapter.moduleName?.(path, workspace) : undefined;
-      return lang.adapter.parse({ path, tree, query: lang.definitions, language: id, module });
+      return lang.adapter.parse({ path, tree, query: lang.definitions, references: lang.references, language: id, module });
     } finally {
       tree.delete();
     }

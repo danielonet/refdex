@@ -1,6 +1,6 @@
 import type { Node } from 'web-tree-sitter';
 import type { ImportDecl } from '../model.ts';
-import { cleanDoc, extractSymbols } from './common.ts';
+import { cleanDoc, extractReferences, extractSymbols } from './common.ts';
 import type { LanguageAdapter } from './types.ts';
 
 const definitions = `
@@ -19,19 +19,37 @@ const definitions = `
 (field_declaration (variable_declaration (variable_declarator name: (identifier) @name))) @field
 `;
 
+// C# types are plain identifiers, so type uses are found by position: `type:` and `returns:` fields,
+// type arguments, base lists and nullable types.
+const name = '[(identifier) @name (generic_name (identifier) @name)]';
+const type = `[${name.slice(1, -1)} (qualified_name name: ${name})]`;
+const references = `
+(invocation_expression function: [${name.slice(1, -1)} (member_access_expression name: ${name})]) @call
+(object_creation_expression type: ${type}) @new
+(base_list ${type}) @extends
+(_ type: ${type}) @reference
+(_ returns: ${type}) @reference
+(type_argument_list ${type}) @reference
+(nullable_type ${type}) @reference
+`;
+
 const TYPE_KINDS = new Set(['class_declaration', 'struct_declaration', 'record_declaration', 'interface_declaration']);
 
 export const csharpAdapter: LanguageAdapter = {
   languages: ['csharp'],
   definitions,
+  references,
 
-  parse({ tree, query, language }) {
+  parse({ tree, query, references: refs, language }) {
     const symbols = extractSymbols(tree.rootNode, query, {
       doc: xmlDocComment,
       exported: (node) => modifiers(node).includes('public'),
       partial: (node) => TYPE_KINDS.has(node.type) && modifiers(node).includes('partial'),
     });
-    return { language, symbols, imports: parseImports(tree.rootNode), hasErrors: tree.rootNode.hasError };
+    return {
+      language, symbols, imports: parseImports(tree.rootNode),
+      references: extractReferences(tree.rootNode, refs, symbols), hasErrors: tree.rootNode.hasError,
+    };
   },
 
   resolveImport(imp, _file, { namespaces }) {

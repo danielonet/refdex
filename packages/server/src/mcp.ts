@@ -6,10 +6,11 @@ import { UsageLog } from './usage.ts';
 
 const INSTRUCTIONS = `RefDex is a method-level index of this workspace's Python, TypeScript, Java and C# code.
 Use it to find and read code instead of opening whole files:
-1. search_symbols to find classes, methods and functions by name;
-2. get_file_outline to see a file's imports and signatures without its bodies;
-3. get_symbol_source to read just the code of one symbol;
-4. find_references to see where a symbol is used before changing it.
+1. get_repo_map for an overview of the most used code, when starting in unfamiliar code;
+2. search_symbols to find classes, methods and functions by name;
+3. get_file_outline to see a file's imports and signatures without its bodies;
+4. get_symbol_source to read just the code of one symbol (with_callees adds what it calls);
+5. find_references to see where a symbol is used before changing it.
 Answers include file paths and line ranges; source is read from disk, so it is current.`;
 
 /**
@@ -92,6 +93,8 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
         qualified_name: z.string().min(1)
           .describe('Qualified name from search_symbols or get_file_outline, e.g. "src/orders:OrderService.find", "shop.orders.Order.total", "com.acme.Invoice"; a plain name works when unique'),
         max_lines: z.number().int().min(10).max(2000).optional().describe('Longest source to return before summarizing (default 250)'),
+        with_callees: z.boolean().optional()
+          .describe('Also list the signatures of the functions and methods it calls, saving a lookup per callee'),
       },
       annotations: readOnly,
     },
@@ -103,15 +106,32 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
     {
       title: 'Find references',
       description:
-        'List the lines that use a symbol, across the files that import its module or share its package/namespace ' +
-        '(following barrel re-exports and C# global usings). Use before renaming or changing a signature. ' +
-        'Matching is by name within those files, so review the lines.',
+        'List where a symbol is used: calls, subclasses and implementations, and type references the index linked to ' +
+        'this declaration, each with the calling symbol; then other lines naming it in the files that import its ' +
+        'module or share its package/namespace (imports, values passed around). Use before renaming or changing a signature.',
       inputSchema: {
         qualified_name: z.string().min(1).describe('Qualified name from search_symbols or get_file_outline; a plain name works when unique'),
       },
       annotations: readOnly,
     },
     (args) => run('find_references', () => tools.findReferences(args)),
+  );
+
+  server.registerTool(
+    'get_repo_map',
+    {
+      title: 'Get repo map',
+      description:
+        'A compact map of the most important code: the symbols used most across the workspace (PageRank over calls, ' +
+        'inheritance and type references), with their signatures, grouped by file and trimmed to a token budget. ' +
+        'Use it first to get oriented in an unfamiliar codebase or folder, then search_symbols or get_symbol_source.',
+      inputSchema: {
+        token_budget: z.number().int().min(100).max(20000).optional().describe('Approximate size of the answer in tokens (default 1000)'),
+        path: z.string().min(1).optional().describe('Only map code under this folder or file (relative to the workspace root or absolute)'),
+      },
+      annotations: readOnly,
+    },
+    (args) => run('get_repo_map', () => tools.getRepoMap(args)),
   );
 
   const transport = new StdioServerTransport();

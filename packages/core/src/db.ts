@@ -1,14 +1,21 @@
 import { closeSync, openSync, writeSync } from 'node:fs';
 import type { DatabaseSync as Database, StatementSync } from 'node:sqlite';
 import type { LanguageId } from './languages.ts';
-import type { ExtractedSymbol, ImportDecl, ImportedName, ParsedFile, SymbolKind } from './model.ts';
+import type { EdgeType, ExtractedSymbol, ImportDecl, ImportedName, ParsedFile, SymbolKind } from './model.ts';
 
 // Loaded at evaluation time (not ESM link time) so a caller can silence node:sqlite's
 // ExperimentalWarning before this module loads it.
 const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
 
 /** Bump when the schema changes. The index is a cache, so an old one is simply rebuilt. */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+
+// Few indexes on edges: every save rewrites a file's edges. edges_to is partial because most edges
+// start (and many stay) unresolved; lookups by target imply NOT NULL, so SQLite still uses it.
+// A first index drops them while bulk-writing and creates them afterwards (see dropEdgeIndexes).
+const EDGE_LOOKUP_INDEXES = `CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id, name);
+CREATE INDEX IF NOT EXISTS edges_from ON edges(from_symbol_id);`;
+const EDGE_TARGET_INDEX = 'CREATE INDEX IF NOT EXISTS edges_to ON edges(to_symbol_id) WHERE to_symbol_id IS NOT NULL;';
 
 const SCHEMA = `
 CREATE TABLE files (
@@ -39,8 +46,9 @@ CREATE TABLE symbols (
 );
 CREATE INDEX symbols_file ON symbols(file_id);
 CREATE INDEX symbols_qname ON symbols(qualified_name);
-CREATE INDEX symbols_namespace ON symbols(namespace);
-CREATE INDEX symbols_parent ON symbols(parent_id);
+CREATE INDEX symbols_name ON symbols(name);
+CREATE INDEX symbols_namespace ON symbols(namespace, name);
+CREATE INDEX symbols_parent ON symbols(parent_id, name);
 -- Every foreign key needs an index, or deleting a file scans whole tables per deleted symbol.
 CREATE INDEX symbols_merged ON symbols(merged_into) WHERE merged_into IS NOT NULL;
 CREATE INDEX symbols_partial ON symbols(qualified_name) WHERE is_partial = 1;
@@ -71,16 +79,26 @@ CREATE TABLE imports (
 CREATE INDEX imports_file ON imports(file_id);
 CREATE INDEX imports_resolved_file ON imports(resolved_file_id);
 CREATE INDEX imports_resolved_symbol ON imports(resolved_symbol_id);
+CREATE INDEX imports_global ON imports(file_id) WHERE is_global = 1;
 CREATE INDEX imports_unresolved ON imports(file_id) WHERE resolved_file_id IS NULL AND resolved_namespace IS NULL;
 
--- calls / extends / implements / references (filled in Phase 4).
+-- Every use of a name (calls, base types, type annotations), resolved or not. Unresolved rows
+-- (standard library, third-party, dynamic) are kept so a later change can link them: when a file is
+-- re-indexed, edges into it lose their target and are resolved again by name.
 CREATE TABLE edges (
-  from_symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
-  to_symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
-  type TEXT NOT NULL
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  -- NULL at module level.
+  from_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,             -- calls / extends / implements / references
+  name TEXT NOT NULL,
+  qualifier TEXT,                 -- this, self, super, a module alias, a type name, ...
+  instantiates INTEGER NOT NULL DEFAULT 0,
+  line INTEGER NOT NULL,
+  to_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL
 );
-CREATE INDEX edges_from ON edges(from_symbol_id);
-CREATE INDEX edges_to ON edges(to_symbol_id);
+${EDGE_LOOKUP_INDEXES}
+${EDGE_TARGET_INDEX}
 
 CREATE VIRTUAL TABLE symbols_fts USING fts5(name, qualified_name, doc, content='symbols', content_rowid='id');
 CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
@@ -125,11 +143,45 @@ export interface ImportRow {
   resolved_symbol_id: number | null;
 }
 
+export interface EdgeRow {
+  id: number;
+  file_id: number;
+  from_symbol_id: number | null;
+  type: EdgeType;
+  name: string;
+  qualifier: string | null;
+  instantiates: number;
+  line: number;
+  to_symbol_id: number | null;
+}
+
+/** A use of a symbol, for find_references. */
+export interface UseRow {
+  path: string;
+  line: number;
+  type: EdgeType;
+  from_qualified_name: string | null;
+}
+
+/** The slim symbol row reference resolution works with. */
+export interface SymbolRef {
+  id: number;
+  file_id: number;
+  kind: SymbolKind;
+  name: string;
+  qualified_name: string;
+  namespace: string | null;
+  parent_id: number | null;
+  language: LanguageId;
+}
+
 export interface IndexStats {
   files: number;
   symbols: number;
   imports: number;
   resolvedImports: number;
+  edges: number;
+  resolvedEdges: number;
   byLanguage: { language: string; files: number; symbols: number }[];
   indexedAt: string | null;
 }
@@ -161,6 +213,22 @@ export class IndexDb {
     }
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;');
     if (version !== SCHEMA_VERSION) this.reset();
+    // In case a first index was interrupted while its edge indexes were dropped.
+    this.createEdgeIndexes();
+  }
+
+  /**
+   * Drops the secondary edge indexes, for writing a whole index into an empty database: creating
+   * them once afterwards is much cheaper than updating them per row. Only safe while no symbols
+   * are deleted (the edges_to index serves the foreign key's ON DELETE SET NULL).
+   */
+  dropEdgeIndexes(): void {
+    this.db.exec('DROP INDEX IF EXISTS edges_file; DROP INDEX IF EXISTS edges_from; DROP INDEX IF EXISTS edges_to;');
+  }
+
+  /** `lookup`: the indexes edge resolution reads; `all` adds the index on targets. */
+  createEdgeIndexes(which: 'lookup' | 'all' = 'all'): void {
+    this.db.exec(which === 'all' ? `${EDGE_LOOKUP_INDEXES}\n${EDGE_TARGET_INDEX}` : EDGE_LOOKUP_INDEXES);
   }
 
   /** Drops every row by recreating the schema (much faster than deleting through the FTS triggers). */
@@ -211,12 +279,26 @@ export class IndexDb {
 
   // ---- writes (the indexer) ----
 
-  /** Replaces a file's symbols and imports. Call inside `transaction`. Returns the file id. */
+  /**
+   * Replaces a file's symbols, imports and edges. Call inside `transaction`. Returns the file id,
+   * which stays the same for a file that was indexed before, so imports of it stay resolved.
+   */
   replaceFile(path: string, hash: string, project: string, parsed: ParsedFile): number {
-    this.stmt('DELETE FROM files WHERE path = ?').run(path);
-    const { lastInsertRowid } = this.stmt('INSERT INTO files (path, language, hash, project, indexed_at) VALUES (?, ?, ?, ?, ?)')
-      .run(path, parsed.language, hash, project, new Date().toISOString());
-    const fileId = Number(lastInsertRowid);
+    const now = new Date().toISOString();
+    const existing = this.stmt('SELECT id FROM files WHERE path = ?').get(path) as { id: number } | undefined;
+    let fileId: number;
+    if (existing) {
+      fileId = existing.id;
+      this.stmt('UPDATE files SET language = ?, hash = ?, project = ?, indexed_at = ? WHERE id = ?').run(parsed.language, hash, project, now, fileId);
+      // Own edges first, so deleting the symbols doesn't update them one by one.
+      this.stmt('DELETE FROM edges WHERE file_id = ?').run(fileId);
+      this.stmt('DELETE FROM imports WHERE file_id = ?').run(fileId);
+      this.stmt('DELETE FROM symbols WHERE file_id = ?').run(fileId);
+    } else {
+      const { lastInsertRowid } = this.stmt('INSERT INTO files (path, language, hash, project, indexed_at) VALUES (?, ?, ?, ?, ?)')
+        .run(path, parsed.language, hash, project, now);
+      fileId = Number(lastInsertRowid);
+    }
     const insertSymbol = this.stmt(
       `INSERT INTO symbols (file_id, kind, native_kind, name, qualified_name, namespace, signature, doc, start_line, end_line, parent_id, exported, is_partial)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -235,6 +317,10 @@ export class IndexDb {
     for (const i of parsed.imports) {
       insertImport.run(fileId, i.kind, i.spec, JSON.stringify(i.names), i.alias ?? null, i.global ? 1 : 0, i.line);
     }
+    const insertEdge = this.stmt('INSERT INTO edges (file_id, from_symbol_id, type, name, qualifier, instantiates, line) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    for (const r of parsed.references) {
+      insertEdge.run(fileId, r.from ? (ids.get(r.from) ?? null) : null, r.type, r.name, r.qualifier ?? null, r.instantiates ? 1 : 0, r.line);
+    }
     return fileId;
   }
 
@@ -242,11 +328,14 @@ export class IndexDb {
     return this.stmt('DELETE FROM files WHERE path = ?').run(path).changes > 0;
   }
 
-  /** Imports that need (re)resolving: those of the given files plus every unresolved one. */
+  /**
+   * Imports that need (re)resolving: those of the given files, those pointing into them (the
+   * imported type has a new symbol id), and every unresolved one.
+   */
   importsToResolve(fileIds: number[]): ImportRow[] {
     const rows = this.stmt(
       `SELECT ${IMPORT_COLUMNS} FROM imports i JOIN files f ON f.id = i.file_id LEFT JOIN files rf ON rf.id = i.resolved_file_id
-       WHERE i.file_id IN (SELECT value FROM json_each(?))
+       WHERE i.file_id IN (SELECT value FROM json_each(?1)) OR i.resolved_file_id IN (SELECT value FROM json_each(?1))
           OR (i.resolved_file_id IS NULL AND i.resolved_namespace IS NULL)`,
     ).all(JSON.stringify(fileIds)) as unknown as (ImportRow & { names: string })[];
     return rows.map((r) => ({ ...r, names: JSON.parse(r.names) }));
@@ -255,6 +344,215 @@ export class IndexDb {
   setImportResolution(importId: number, fileId: number | null, namespace: string | null, symbolId: number | null): void {
     this.stmt('UPDATE imports SET resolved_file_id = ?, resolved_namespace = ?, resolved_symbol_id = ? WHERE id = ?')
       .run(fileId, namespace, symbolId, importId);
+  }
+
+  /**
+   * Edges that need (re)resolving: every edge of `fileIds` (new and changed files, and files whose
+   * imports now resolve differently), the edges in `edgeIds` (they pointed into replaced or removed
+   * files), and unresolved edges in `seeingFileIds` named like a declaration in `declaringFileIds`
+   * (a new declaration may be what they meant). `all`: every edge (a first index).
+   */
+  edgesToResolve(opts: { all?: boolean; fileIds: number[]; edgeIds: number[]; seeingFileIds: number[]; declaringFileIds: number[] }): EdgeRow[] {
+    const columns = 'e.id, e.file_id, e.from_symbol_id, e.type, e.name, e.qualifier, e.instantiates, e.line, e.to_symbol_id';
+    if (opts.all) return this.stmt(`SELECT ${columns} FROM edges e`).all() as unknown as EdgeRow[];
+    // Collected step by step in a temp table: one OR-ed query makes SQLite scan every unresolved edge.
+    this.db.exec(`CREATE TEMP TABLE IF NOT EXISTS pending_edges (id INTEGER PRIMARY KEY);
+      CREATE TEMP TABLE IF NOT EXISTS pending_names (name TEXT PRIMARY KEY);
+      DELETE FROM pending_edges; DELETE FROM pending_names;`);
+    this.stmt('INSERT OR IGNORE INTO pending_edges SELECT x.id FROM json_each(?) j JOIN edges x ON x.file_id = j.value').run(JSON.stringify(opts.fileIds));
+    this.stmt('INSERT OR IGNORE INTO pending_edges SELECT value FROM json_each(?)').run(JSON.stringify(opts.edgeIds));
+    if (opts.seeingFileIds.length && opts.declaringFileIds.length) {
+      this.stmt('INSERT OR IGNORE INTO pending_names SELECT s.name FROM json_each(?) j JOIN symbols s ON s.file_id = j.value')
+        .run(JSON.stringify(opts.declaringFileIds));
+      this.stmt(
+        `INSERT OR IGNORE INTO pending_edges SELECT x.id FROM json_each(?) j
+         JOIN edges x ON x.file_id = j.value AND x.to_symbol_id IS NULL JOIN pending_names n ON n.name = x.name`,
+      ).run(JSON.stringify(opts.seeingFileIds));
+    }
+    return this.stmt(`SELECT ${columns} FROM pending_edges p JOIN edges e ON e.id = p.id`).all() as unknown as EdgeRow[];
+  }
+
+  /** Path and language of every file. */
+  fileLanguages(): Map<number, { path: string; language: LanguageId }> {
+    const rows = this.stmt('SELECT id, path, language FROM files').all() as { id: number; path: string; language: LanguageId }[];
+    return new Map(rows.map((r) => [r.id, { path: r.path, language: r.language }]));
+  }
+
+  /** Files importing these files; call before removing them, since their imports become unresolved. */
+  importersOf(paths: string[]): number[] {
+    if (!paths.length) return [];
+    const rows = this.stmt(
+      `SELECT DISTINCT i.file_id AS id FROM imports i JOIN files f ON f.id = i.resolved_file_id
+       WHERE f.path IN (SELECT value FROM json_each(?))`,
+    ).all(JSON.stringify(paths)) as { id: number }[];
+    return rows.map((r) => r.id);
+  }
+
+  /** Edges pointing at declarations in these files; call before replacing or removing them. */
+  edgesInto(paths: string[]): number[] {
+    if (!paths.length) return [];
+    const rows = this.stmt(
+      `SELECT e.id FROM files f JOIN symbols s ON s.file_id = f.id JOIN edges e ON e.to_symbol_id = s.id
+       WHERE f.path IN (SELECT value FROM json_each(?))`,
+    ).all(JSON.stringify(paths)) as { id: number }[];
+    return rows.map((r) => r.id);
+  }
+
+  /**
+   * Files that can refer to declarations of `fileIds` by name: the files themselves, files importing
+   * them (also through barrels), and for Java/C# files in or importing their packages/namespaces
+   * (C#: also nested namespaces and projects with a matching `global using`).
+   */
+  filesSeeing(fileIds: number[]): number[] {
+    const rows = this.stmt(
+      `WITH RECURSIVE exporting(id) AS (
+         SELECT value FROM json_each(?1)
+         UNION SELECT i.file_id FROM imports i JOIN exporting e ON i.resolved_file_id = e.id WHERE i.kind = 're-export'),
+       ns(namespace, language) AS (
+         SELECT DISTINCT s.namespace, f.language FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.file_id IN (SELECT value FROM json_each(?1)) AND s.namespace IS NOT NULL AND f.language IN ('java', 'csharp'))
+       SELECT id FROM exporting
+       UNION SELECT i.file_id FROM imports i WHERE i.resolved_file_id IN (SELECT id FROM exporting)
+       UNION SELECT s.file_id FROM ns JOIN symbols s ON s.namespace = ns.namespace JOIN files f ON f.id = s.file_id AND f.language = ns.language
+       UNION SELECT s.file_id FROM ns JOIN symbols s ON ns.language = 'csharp' AND s.namespace LIKE ns.namespace || '.%'
+         JOIN files f ON f.id = s.file_id AND f.language = 'csharp'
+       UNION SELECT i.file_id FROM ns JOIN imports i ON i.resolved_namespace = ns.namespace
+       UNION SELECT f.id FROM ns JOIN imports gi ON gi.is_global = 1 AND gi.resolved_namespace = ns.namespace
+         JOIN files gf ON gf.id = gi.file_id JOIN files f ON f.project = gf.project AND f.language = gf.language`,
+    ).all(JSON.stringify(fileIds)) as { id: number }[];
+    return rows.map((r) => r.id);
+  }
+
+  setEdgeTarget(edgeId: number, toSymbolId: number | null, type: EdgeType): void {
+    this.stmt('UPDATE edges SET to_symbol_id = ?, type = ? WHERE id = ?').run(toSymbolId, type, edgeId);
+  }
+
+  /** Symbols named `name` (partial types: the canonical part only). */
+  symbolRefsNamed(name: string): SymbolRef[] {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.name = ? AND s.merged_into IS NULL ORDER BY s.id`,
+    ).all(name) as unknown as SymbolRef[];
+  }
+
+  /** How many symbols are named `name`. */
+  countNamed(name: string): number {
+    return (this.stmt('SELECT count(*) AS n FROM symbols WHERE name = ?').get(name) as { n: number }).n;
+  }
+
+  /** Symbols named `name` declared directly in one of the given types (or type parts). */
+  symbolRefsIn(name: string, parentIds: number[]): SymbolRef[] {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM json_each(?2) j JOIN symbols s INDEXED BY symbols_parent ON s.parent_id = j.value AND s.name = ?1 JOIN files f ON f.id = s.file_id
+       WHERE s.merged_into IS NULL ORDER BY s.id`,
+    ).all(name, JSON.stringify(parentIds)) as unknown as SymbolRef[];
+  }
+
+  symbolRefsInFile(name: string, fileId: number): SymbolRef[] {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM symbols s INDEXED BY symbols_file JOIN files f ON f.id = s.file_id WHERE s.file_id = ? AND s.name = ? AND s.merged_into IS NULL ORDER BY s.id`,
+    ).all(fileId, name) as unknown as SymbolRef[];
+  }
+
+  symbolRefsInNamespace(name: string, namespace: string): SymbolRef[] {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM symbols s INDEXED BY symbols_namespace JOIN files f ON f.id = s.file_id WHERE s.namespace = ? AND s.name = ? AND s.merged_into IS NULL ORDER BY s.id`,
+    ).all(namespace, name) as unknown as SymbolRef[];
+  }
+
+  /** Every symbol (partial types: the canonical part only), for resolving a whole index at once. */
+  allSymbolRefs(): SymbolRef[] {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.merged_into IS NULL ORDER BY s.id`,
+    ).all() as unknown as SymbolRef[];
+  }
+
+  fileSymbolRefs(fileId: number): SymbolRef[] {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.file_id = ? ORDER BY s.id`,
+    ).all(fileId) as unknown as SymbolRef[];
+  }
+
+  symbolRef(id: number): SymbolRef | undefined {
+    return this.stmt(
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+       FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.id = ?`,
+    ).get(id) as SymbolRef | undefined;
+  }
+
+  /** A type and the other parts of it, if it is a partial type (canonical id first). */
+  typeParts(id: number): number[] {
+    const row = this.stmt('SELECT coalesce(merged_into, id) AS canonical FROM symbols WHERE id = ?').get(id) as { canonical: number } | undefined;
+    if (!row) return [id];
+    const rows = this.stmt('SELECT id FROM symbols WHERE merged_into = ? ORDER BY id').all(row.canonical) as { id: number }[];
+    return [row.canonical, ...rows.map((r) => r.id)];
+  }
+
+  /** Resolved base types (extends and implements) of a type's parts. */
+  baseTypes(typeIds: number[]): number[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT to_symbol_id AS id FROM edges
+       WHERE from_symbol_id IN (SELECT value FROM json_each(?)) AND type IN ('extends', 'implements') AND to_symbol_id IS NOT NULL`,
+    ).all(JSON.stringify(typeIds)) as { id: number }[];
+    return rows.map((r) => r.id);
+  }
+
+  /** Where the given symbols are used, according to the resolved edges. */
+  uses(symbolIds: number[]): UseRow[] {
+    return this.stmt(
+      `SELECT f.path, e.line, e.type, s.qualified_name AS from_qualified_name
+       FROM edges e JOIN files f ON f.id = e.file_id LEFT JOIN symbols s ON s.id = e.from_symbol_id
+       WHERE e.to_symbol_id IN (SELECT value FROM json_each(?))
+       ORDER BY f.path, e.line`,
+    ).all(JSON.stringify(symbolIds)) as unknown as UseRow[];
+  }
+
+  /**
+   * Calls made by the given symbols and everything declared inside them: resolved callees and the
+   * names of unresolved ones (outside the index).
+   */
+  callees(symbolIds: number[]): { resolved: SymbolRow[]; unresolved: string[] } {
+    const scope = `WITH RECURSIVE scope(id) AS (
+         SELECT value FROM json_each(?1)
+         UNION SELECT s.id FROM symbols s JOIN scope ON s.parent_id = scope.id)`;
+    const resolved = this.stmt(
+      `${scope}
+       SELECT ${SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+       WHERE s.id IN (SELECT e.to_symbol_id FROM edges e WHERE e.type = 'calls' AND e.from_symbol_id IN scope)
+         AND s.id NOT IN scope
+       ORDER BY f.path, s.start_line`,
+    ).all(JSON.stringify(symbolIds)) as unknown as SymbolRow[];
+    const unresolved = this.stmt(
+      `${scope}
+       SELECT DISTINCT coalesce(e.qualifier || '.', '') || e.name AS name FROM edges e
+       WHERE e.type = 'calls' AND e.to_symbol_id IS NULL AND e.from_symbol_id IN scope ORDER BY e.id`,
+    ).all(JSON.stringify(symbolIds)) as { name: string }[];
+    return { resolved, unresolved: unresolved.map((r) => r.name) };
+  }
+
+  /**
+   * The resolved symbol graph for ranking: one row per (from, to) pair with the number of uses.
+   * Uses from a part of a partial type count for its canonical part; self-references are dropped.
+   */
+  graph(): { from: number; to: number; count: number }[] {
+    return this.stmt(
+      `SELECT coalesce(s.merged_into, s.id) AS "from", e.to_symbol_id AS "to", count(*) AS count
+       FROM edges e JOIN symbols s ON s.id = e.from_symbol_id
+       WHERE e.to_symbol_id IS NOT NULL AND e.to_symbol_id != coalesce(s.merged_into, s.id)
+       GROUP BY 1, 2`,
+    ).all() as { from: number; to: number; count: number }[];
+  }
+
+  /** Every symbol with what the repo map shows of it (partial types: the canonical part only). */
+  allSymbols(): SymbolRow[] {
+    return this.stmt(
+      `SELECT ${SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.merged_into IS NULL`,
+    ).all() as unknown as SymbolRow[];
   }
 
   /**
@@ -372,14 +670,20 @@ export class IndexDb {
    * project (the folder of the nearest .csproj).
    */
   effectiveImports(path: string): ImportRow[] {
+    // Two indexed queries: an OR of both conditions scans every import.
     const rows = this.stmt(
-      `SELECT ${IMPORT_COLUMNS} FROM imports i JOIN files f ON f.id = i.file_id LEFT JOIN files rf ON rf.id = i.resolved_file_id
-       WHERE f.path = ?1
-          OR (i.is_global = 1 AND f.language = (SELECT language FROM files WHERE path = ?1)
-              AND f.project = (SELECT project FROM files WHERE path = ?1))
-       ORDER BY f.path = ?1 DESC, i.line`,
-    ).all(path) as unknown as (ImportRow & { names: string })[];
-    return rows.map((r) => ({ ...r, names: JSON.parse(r.names) }));
+      `SELECT * FROM (
+         SELECT ${IMPORT_COLUMNS}, 0 AS other FROM files f JOIN imports i ON i.file_id = f.id LEFT JOIN files rf ON rf.id = i.resolved_file_id
+         WHERE f.path = ?1
+         UNION ALL
+         SELECT ${IMPORT_COLUMNS}, 1 AS other FROM files me
+           JOIN imports i INDEXED BY imports_global ON i.is_global = 1
+           JOIN files f ON f.id = i.file_id AND f.project = me.project AND f.language = me.language AND f.id != me.id
+           LEFT JOIN files rf ON rf.id = i.resolved_file_id
+         WHERE me.path = ?1 AND me.language = 'csharp')
+       ORDER BY other, line`,
+    ).all(path) as unknown as (ImportRow & { names: string; other?: number })[];
+    return rows.map(({ other: _other, ...r }) => ({ ...r, names: JSON.parse(r.names) }));
   }
 
   /**
@@ -420,9 +724,10 @@ export class IndexDb {
     ).all() as unknown as IndexStats['byLanguage'];
     const row = this.stmt(
       `SELECT max(indexed_at) AS indexedAt, (SELECT count(*) FROM imports) AS imports,
-         (SELECT count(*) FROM imports WHERE resolved_file_id IS NOT NULL OR resolved_namespace IS NOT NULL) AS resolvedImports
+         (SELECT count(*) FROM imports WHERE resolved_file_id IS NOT NULL OR resolved_namespace IS NOT NULL) AS resolvedImports,
+         (SELECT count(*) FROM edges) AS edges, (SELECT count(*) FROM edges WHERE to_symbol_id IS NOT NULL) AS resolvedEdges
        FROM files`,
-    ).get() as { indexedAt: string | null; imports: number; resolvedImports: number };
+    ).get() as { indexedAt: string | null; imports: number; resolvedImports: number; edges: number; resolvedEdges: number };
     return { ...this.counts(), ...row, byLanguage };
   }
 
@@ -578,9 +883,12 @@ const BROWSE: Record<BrowseTable, { table: string; from: string; description: st
   },
   edges: {
     table: 'edges',
-    from: 'edges e JOIN symbols a ON a.id = e.from_symbol_id JOIN symbols b ON b.id = e.to_symbol_id',
-    description: 'Calls, inheritance and references between symbols (filled in Phase 4)',
-    columns: [['from', 'a.qualified_name'], ['type', 'e.type'], ['to', 'b.qualified_name']],
+    from: 'edges e JOIN files f ON f.id = e.file_id LEFT JOIN symbols a ON a.id = e.from_symbol_id LEFT JOIN symbols b ON b.id = e.to_symbol_id',
+    description: 'Calls, inheritance and type references; "to" is empty when the name is outside the index',
+    columns: [
+      ['id', 'e.id'], ['path', 'f.path'], ['line', 'e.line'], ['from', 'a.qualified_name'], ['type', 'e.type'],
+      ['qualifier', 'e.qualifier'], ['name', 'e.name'], ['to', 'b.qualified_name'],
+    ],
   },
 };
 

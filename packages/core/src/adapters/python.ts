@@ -2,7 +2,7 @@ import type { Node } from 'web-tree-sitter';
 import { dirname, join, relative, sep } from 'node:path';
 import type { ImportDecl } from '../model.ts';
 import type { Workspace } from '../workspace.ts';
-import { cleanDoc, extractSymbols } from './common.ts';
+import { cleanDoc, extractReferences, extractSymbols } from './common.ts';
 import type { LanguageAdapter } from './types.ts';
 
 const definitions = `
@@ -10,9 +10,17 @@ const definitions = `
 (function_definition name: (identifier) @name) @function
 `;
 
+const references = `
+(call function: [(identifier) @name (attribute attribute: (identifier) @name)]) @call
+(decorator [(identifier) @name (attribute attribute: (identifier) @name)]) @call
+(class_definition superclasses: (argument_list [(identifier) @name (attribute attribute: (identifier) @name)])) @extends
+(type [(identifier) @name (attribute attribute: (identifier) @name) (generic_type (identifier) @name)]) @reference
+`;
+
 export const pythonAdapter: LanguageAdapter = {
   languages: ['python'],
   definitions,
+  references,
 
   /** Dotted module name relative to the deepest Python root, e.g. `shop/orders/__init__.py` -> `shop.orders`. */
   moduleName(path: string, ws: Workspace): string {
@@ -20,7 +28,7 @@ export const pythonAdapter: LanguageAdapter = {
     return relative(root, path).replace(/\.pyi?$/, '').split(sep).filter((p) => p !== '__init__').join('.');
   },
 
-  parse({ tree, query, language, module }) {
+  parse({ tree, query, references: refs, language, module }) {
     const symbols = extractSymbols(tree.rootNode, query, {
       module,
       outer: (node) => (node.parent?.type === 'decorated_definition' ? node.parent : node),
@@ -28,7 +36,10 @@ export const pythonAdapter: LanguageAdapter = {
       exported: (_node, _outer, topLevel, name) => topLevel && !name.startsWith('_'),
       kind: (kind, parent) => (kind === 'function' && parent?.kind === 'class' ? 'method' : kind),
     });
-    return { language, symbols, imports: parseImports(tree.rootNode), hasErrors: tree.rootNode.hasError };
+    return {
+      language, symbols, imports: parseImports(tree.rootNode),
+      references: extractReferences(tree.rootNode, refs, symbols), hasErrors: tree.rootNode.hasError,
+    };
   },
 
   resolveImport(imp, file, { workspace: ws }) {

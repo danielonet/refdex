@@ -3,7 +3,7 @@ import { dirname, join, relative, sep } from 'node:path';
 import type { ImportDecl, ImportedName } from '../model.ts';
 import { aliasCandidates } from '../resolve/tsconfig.ts';
 import type { Workspace } from '../workspace.ts';
-import { blockDocComment, extractSymbols, stringValue } from './common.ts';
+import { blockDocComment, extractReferences, extractSymbols, stringValue } from './common.ts';
 import type { LanguageAdapter } from './types.ts';
 
 const definitions = `
@@ -23,19 +23,29 @@ const definitions = `
 (program (export_statement (lexical_declaration (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])) @function))
 `;
 
+const references = `
+(call_expression function: [(identifier) @name (member_expression property: (property_identifier) @name)]) @call
+(new_expression constructor: [(identifier) @name (member_expression property: (property_identifier) @name)]) @new
+(extends_clause value: [(identifier) @name (member_expression property: (property_identifier) @name)]) @extends
+(implements_clause [(type_identifier) @name (generic_type name: (type_identifier) @name)]) @implements
+(extends_type_clause type: [(type_identifier) @name (generic_type name: (type_identifier) @name)]) @extends
+(type_identifier) @name @reference
+`;
+
 /** Extensions tried for an extensionless specifier, in TypeScript's order. */
 const EXTENSIONS = ['.ts', '.tsx', '.d.ts', '.mts', '.cts'];
 
 export const typescriptAdapter: LanguageAdapter = {
   languages: ['typescript', 'tsx'],
   definitions,
+  references,
 
   /** Path relative to the workspace root without extension, e.g. `src/orders`. */
   moduleName(path: string, ws: Workspace): string {
     return relative(ws.root, path).split(sep).join('/').replace(/(\.d)?\.(ts|tsx|mts|cts)$/, '');
   },
 
-  parse({ tree, query, language, module }) {
+  parse({ tree, query, references: refs, language, module }) {
     const symbols = extractSymbols(tree.rootNode, query, {
       module,
       moduleSeparator: ':',
@@ -43,7 +53,10 @@ export const typescriptAdapter: LanguageAdapter = {
       doc: (_node, outer) => blockDocComment(outer),
       exported: (node, outer, topLevel) => topLevel && (outer !== node || node.parent?.type === 'export_statement'),
     });
-    return { language, symbols, imports: parseImports(tree.rootNode), hasErrors: tree.rootNode.hasError };
+    return {
+      language, symbols, imports: parseImports(tree.rootNode),
+      references: extractReferences(tree.rootNode, refs, symbols), hasErrors: tree.rootNode.hasError,
+    };
   },
 
   resolveImport(imp, file, { workspace: ws }) {

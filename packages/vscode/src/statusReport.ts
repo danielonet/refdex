@@ -25,6 +25,7 @@ const IDLE = '$(refdex-logo)';
 const EXPLAIN = {
   symbols: 'Classes, methods, properties and other declarations. AI assistants look these up by name instead of reading whole files.',
   imports: 'Imports that point at code in this workspace. Standard-library and third-party imports stay unresolved on purpose.',
+  uses: 'Calls, base types and type references linked to the declaration they mean. They power find_references and the repo map. Library calls and ambiguous ones stay unlinked.',
   watch: 'When enabled, saved, created and deleted files are re-indexed within a moment. Only changed files are parsed again.',
   database: 'The index is a SQLite database in VS Code\'s storage for this workspace, not in your repository. Open it to browse or export its tables.',
   regenerate: 'Drops the whole index and builds it again from scratch. Normally not needed: the index updates itself as files change.',
@@ -154,6 +155,11 @@ export class StatusReport implements vscode.Disposable {
     md.appendMarkdown(row(`<strong>Imports resolved</strong> ${info('imports')}`, grey(`${stats.resolvedImports.toLocaleString()} of ${stats.imports.toLocaleString()}`)));
     md.appendMarkdown(headline(`${Math.round(share * 100)}%`, 'to workspace code'));
     md.appendMarkdown(bar(share));
+    md.appendMarkdown('---\n\n');
+
+    // Uses: a count, not a share; most unlinked uses are library calls.
+    md.appendMarkdown(row(`<strong>Uses linked</strong> ${info('uses')}`, grey(`of ${stats.edges.toLocaleString()} found`)));
+    md.appendMarkdown(headline(stats.resolvedEdges.toLocaleString(), 'calls, base types and type references'));
     md.appendMarkdown('---\n\n');
 
     this.appendClients(md);

@@ -1,6 +1,6 @@
 import type { Node } from 'web-tree-sitter';
 import type { ImportDecl } from '../model.ts';
-import { blockDocComment, extractSymbols } from './common.ts';
+import { blockDocComment, extractReferences, extractSymbols } from './common.ts';
 import type { LanguageAdapter } from './types.ts';
 
 const definitions = `
@@ -16,16 +16,30 @@ const definitions = `
 (constant_declaration declarator: (variable_declarator name: (identifier) @name)) @field
 `;
 
+const type = '[(type_identifier) @name (generic_type (type_identifier) @name) (scoped_type_identifier (type_identifier) @name) (generic_type (scoped_type_identifier (type_identifier) @name))]';
+const references = `
+(method_invocation name: (identifier) @name) @call
+(object_creation_expression type: ${type}) @new
+(superclass ${type}) @extends
+(super_interfaces (type_list ${type})) @implements
+(extends_interfaces (type_list ${type})) @extends
+(type_identifier) @name @reference
+`;
+
 export const javaAdapter: LanguageAdapter = {
   languages: ['java'],
   definitions,
+  references,
 
-  parse({ tree, query, language }) {
+  parse({ tree, query, references: refs, language }) {
     const symbols = extractSymbols(tree.rootNode, query, {
       doc: (node) => blockDocComment(node),
       exported: (node) => hasModifier(node, 'public'),
     });
-    return { language, symbols, imports: parseImports(tree.rootNode), hasErrors: tree.rootNode.hasError };
+    return {
+      language, symbols, imports: parseImports(tree.rootNode),
+      references: extractReferences(tree.rootNode, refs, symbols), hasErrors: tree.rootNode.hasError,
+    };
   },
 
   /** Imports name types or packages, so they resolve through the namespace index, not the file system. */

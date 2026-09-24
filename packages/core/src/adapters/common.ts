@@ -1,8 +1,12 @@
 import type { Node, Query } from 'web-tree-sitter';
-import type { ExtractedSymbol, SymbolKind } from '../model.ts';
+import type { EdgeType, ExtractedReference, ExtractedSymbol, SymbolKind } from '../model.ts';
 
 const MAX_SIGNATURE = 240;
 const MAX_DOC = 400;
+const MAX_QUALIFIER = 120;
+
+/** Where each symbol was declared, for `extractReferences`: its range-owning node and its name node. */
+const declarations = new WeakMap<ExtractedSymbol, { start: number; end: number; nameStart: number }>();
 
 export interface ExtractOptions {
   /** Qualified-name prefix for every top-level symbol (Python/TS module), joined with `moduleSeparator`. */
@@ -47,6 +51,7 @@ export function extractSymbols(root: Node, query: Query, opts: ExtractOptions = 
       partial: opts.partial?.(node) ?? false,
     };
     nodes.set(sym, node);
+    declarations.set(sym, { start: outer.startIndex, end: outer.endIndex, nameStart: nameNode.startIndex });
     symbols.push(sym);
   }
   const nodeOf = (sym: ExtractedSymbol) => nodes.get(sym)!;
@@ -75,6 +80,79 @@ export function extractSymbols(root: Node, query: Query, opts: ExtractOptions = 
     else stack.push(sym);
   }
   return symbols;
+}
+
+/** Capture names of a `references` query, strongest first. */
+const USE_KINDS = ['call', 'new', 'extends', 'implements', 'reference'] as const;
+type UseKind = (typeof USE_KINDS)[number];
+const EDGE_TYPE: Record<UseKind, EdgeType> = { call: 'calls', new: 'calls', extends: 'extends', implements: 'implements', reference: 'references' };
+
+/** Nodes whose text up to a member's name is the member's qualifier: `a.b` in `a.b.c`, `this` in `this.m()`. */
+const MEMBER_ACCESS = new Set([
+  'member_expression', 'attribute', 'member_access_expression', 'method_invocation', 'scoped_type_identifier',
+  'qualified_name', 'nested_type_identifier', 'scoped_identifier', 'field_access',
+]);
+const GENERIC = new Set(['generic_type', 'generic_name']);
+/** Qualified type names whose leading parts are packages, not type uses: only the last part is a reference. */
+const QUALIFIED_TYPE = new Set(['scoped_type_identifier', 'qualified_name', 'nested_type_identifier']);
+
+/**
+ * Runs a references query (see `LanguageAdapter.references`) and attaches each use to the innermost
+ * symbol whose declaration contains it. Names of the declarations themselves are skipped.
+ */
+export function extractReferences(root: Node, query: Query, symbols: ExtractedSymbol[]): ExtractedReference[] {
+  const declared = new Set<number>();
+  for (const s of symbols) {
+    const d = declarations.get(s);
+    if (d) declared.add(d.nameStart);
+  }
+  const uses = new Map<number, { kind: UseKind; name: Node }>();
+  for (const match of query.matches(root)) {
+    const name = match.captures.find((c) => c.name === 'name')?.node;
+    const use = match.captures.find((c) => c.name !== 'name');
+    if (!name || !use || declared.has(name.startIndex)) continue;
+    const kind = use.name as UseKind;
+    const prev = uses.get(name.startIndex);
+    if (prev && USE_KINDS.indexOf(prev.kind) <= USE_KINDS.indexOf(kind)) continue;
+    const parent = name.parent;
+    if (parent?.type === 'type_parameter') continue;
+    if (parent && QUALIFIED_TYPE.has(parent.type)
+      && (parent.lastNamedChild?.startIndex !== name.startIndex || QUALIFIED_TYPE.has(parent.parent?.type ?? ''))) continue;
+    uses.set(name.startIndex, { kind, name });
+  }
+
+  // Sweep uses and declarations in source order, keeping a stack of the declarations still open.
+  const scopes = symbols
+    .filter((s) => declarations.has(s))
+    .sort((a, b) => declarations.get(a)!.start - declarations.get(b)!.start || declarations.get(b)!.end - declarations.get(a)!.end);
+  const stack: ExtractedSymbol[] = [];
+  let next = 0;
+  const out: ExtractedReference[] = [];
+  for (const [pos, { kind, name }] of [...uses].sort((a, b) => a[0] - b[0])) {
+    while (next < scopes.length && declarations.get(scopes[next])!.start <= pos) {
+      const start = declarations.get(scopes[next])!.start;
+      while (stack.length && declarations.get(stack[stack.length - 1])!.end <= start) stack.pop();
+      stack.push(scopes[next++]);
+    }
+    while (stack.length && declarations.get(stack[stack.length - 1])!.end <= pos) stack.pop();
+    out.push({
+      type: EDGE_TYPE[kind],
+      name: name.text,
+      qualifier: qualifierOf(name),
+      instantiates: kind === 'new',
+      line: name.startPosition.row + 1,
+      from: stack[stack.length - 1],
+    });
+  }
+  return out;
+}
+
+function qualifierOf(name: Node): string | undefined {
+  const node = name.parent && GENERIC.has(name.parent.type) ? name.parent : name;
+  const access = node.parent;
+  if (!access || !MEMBER_ACCESS.has(access.type)) return undefined;
+  const text = access.text.slice(0, node.startIndex - access.startIndex).replace(/\s+/g, '').replace(/(\?\.|\.|::|->)$/, '');
+  return text ? truncate(text, MAX_QUALIFIER) : undefined;
 }
 
 function nearestNamespace(sym: ExtractedSymbol | undefined): string | null {

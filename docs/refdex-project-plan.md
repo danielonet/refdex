@@ -70,7 +70,7 @@ Six tables hold everything; symbol kinds are normalized so tools work the same a
 | `symbols` | id, file_id, kind, native_kind, name, qualified_name, namespace, signature, doc, start_line, end_line, parent_id | Classes, methods, properties, etc. |
 | `symbol_parts` | symbol_id, file_id, start_line, end_line | Links a C# partial class to every file it spans |
 | `imports` | file_id, spec, resolved_file_id, resolved_namespace | Raw import plus where it resolves |
-| `edges` | from_symbol_id, to_symbol_id, type | `calls`, `extends`, `implements`, `references` |
+| `edges` | file_id, from_symbol_id, type, name, qualifier, line, to_symbol_id | `calls`, `extends`, `implements`, `references`; unresolved uses have no `to_symbol_id` |
 | `symbols_fts` | name, qualified_name, doc | FTS5 index for fast name search |
 
 Normalized kinds: `namespace`, `module`, `class`, `interface`, `enum`, `type_alias`, `function`, `method`, `property`, `field`. The original term (e.g. `record`, `struct`) is kept in `native_kind`.
@@ -212,10 +212,41 @@ Phase 3 notes (2026-09-24):
 
 ### Phase 4: Graph and ranking
 
-- [ ] Extract call, inheritance and implementation edges
-- [ ] PageRank over the reference graph
-- [ ] `get_repo_map` tool with token budget
-- [ ] `with_callees` option on `get_symbol_source`
+- [x] Extract call, inheritance and implementation edges
+- [x] PageRank over the reference graph
+- [x] `get_repo_map` tool with token budget
+- [x] `with_callees` option on `get_symbol_source`
+
+Phase 4 notes (2026-09-24):
+
+- **Extraction:** each adapter has a second tree-sitter query, `references`, for calls (`f()`, `obj.m()`, `new C()`), base types and type annotations. Each use is stored with its name, its qualifier as written (`this`, `self`, `super`, `ns`, `Util`, `a.b`), its line and the innermost enclosing symbol, which is null at module level. C# base lists are stored as `extends` and become `implements` when the target is an interface.
+- **Every use is stored, resolved or not** (schema version 4, so older indexes rebuild). When a file is re-indexed, edges into it lose their target and are resolved again by name. Unresolved edges are how a new declaration finds the uses that meant it.
+- **Resolution is by scope, not by type inference:**
+  - For unqualified names: enclosing declarations first. That means lexical scope in TypeScript and Python, and members of the enclosing types and their base types in Java and C#. Then imports (named imports through barrels, Python module aliases, Java single-type and static imports, C# `using static` and aliases), then the package or namespace.
+  - `this.m()` and `super.m()` look in the enclosing type and its resolved bases. `Type.m()` and `module.m()` look in that type or module.
+  - `obj.m()` with an unknown receiver resolves only if exactly one visible type declares `m`. Capitalized receivers that aren't indexed types (`String`, `Math`, `vscode.Uri`) are treated as external. Standard collection and string methods (`get`, `clear`, `join`, …) are never guessed.
+  - Anything ambiguous stays unresolved. find_references and the repo map depend on these edges, so precision matters more than recall.
+- **Incremental updates:** a file keeps its row id when re-indexed, so imports of it stay resolved. A save re-resolves:
+  - the file's own edges;
+  - edges that pointed into it;
+  - unresolved edges named like one of its declarations, but only in files that can see it: importers, including through barrels, and for Java/C# the same or imported package/namespace;
+  - all edges of files whose imports changed, or that imported a removed file.
+- **Tools:**
+  - `find_references` lists the linked uses first, each with its calling symbol. Other lines naming the symbol in the files that can see it follow: imports, and values passed around.
+  - `get_symbol_source` with `with_callees` appends the signatures of the indexed symbols it calls, plus the names of unlinked calls.
+  - `get_repo_map(token_budget, path?)` ranks symbols with PageRank (damping 0.85, square-root edge weights) over the resolved graph. It adds symbols in rank order, each with its enclosing types, until about 4 characters per token of the budget are used, then groups them by file in rank order. Fields and properties are left out unless something uses them. Ranks are computed in the MCP server and cached until the index changes.
+- **Real repos:** RefDex links 1,239 of 3,717 uses and Pyrite 1,428 of 4,557. The unlinked ones are mostly library calls. A random sample of 30 Pyrite links was all correct.
+- **Performance (same synthetic 3,000-file TypeScript project, now with 450k uses):**
+  - Full index: 26 s (was 8.6 s). About 3 s of it is the second query and extraction, the rest is storing and resolving edges. A first index into an empty database writes edges without their secondary indexes and creates them afterwards.
+  - Saved file: 37–56 ms (was 34 ms).
+  - No-change rescan: 0.5 s.
+  - Repo map on this project: 1.4 s to read the graph and rank it, once per index change.
+  - Lookups of very common names (`get`, or `m0` declared 3,000 times here) use indexed per-parent, per-file and per-namespace queries. A first index loads all symbols once.
+- **Tests:** `packages/core/test/graph.test.ts` covers edges in all four languages, re-linking after edits, renames and removals, and PageRank. The server tests cover the new tool outputs. Core has 34 tests and the server 19.
+- **Known gaps:**
+  - There's no type inference: calls on locals, parameters and fields of a known type resolve only when the method name is unique among visible types.
+  - Functions passed as values, decorators with arguments beyond the call itself, and Python `getattr`/dynamic dispatch aren't linked.
+  - Constructor calls link to the class, not to a particular constructor overload.
 
 ### Phase 5: Hardening and VS Code release
 

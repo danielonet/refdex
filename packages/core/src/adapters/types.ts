@@ -8,6 +8,8 @@ export interface ParseInput {
   tree: Tree;
   /** The adapter's compiled `definitions` query for this file's grammar. */
   query: Query;
+  /** The adapter's compiled `references` query. */
+  references: Query;
   language: LanguageId;
   /** Module name for path-based languages (see `LanguageAdapter.moduleName`). */
   module?: string;
@@ -40,6 +42,12 @@ export interface LanguageAdapter {
    * symbol kind) and its identifier as `@name`.
    */
   readonly definitions: string;
+  /**
+   * Tree-sitter query for uses of names. Each pattern captures the name as `@name` and the whole use
+   * as `@call`, `@new`, `@extends`, `@implements` or `@reference`. When one name is captured by
+   * several patterns, the earliest capture kind in that list wins.
+   */
+  readonly references: string;
   /** Module name used as the namespace of path-based languages (Python, TypeScript). */
   moduleName?(path: string, workspace: Workspace): string;
   parse(input: ParseInput): ParsedFile;
