@@ -48,6 +48,11 @@
         "category": "RefDex"
       },
       {
+        "command": "refdex.toggleWatch",
+        "title": "Toggle Watching for Changes",
+        "category": "RefDex"
+      },
+      {
         "command": "refdex.exportCsv",
         "title": "Export Table to CSV\u2026",
         "category": "RefDex"

@@ -1,28 +1,54 @@
 import * as vscode from 'vscode';
 import type { IndexStats } from './daemon';
-import { count, LANGUAGE_NAMES, timeAgo } from './webviewUtil';
+import { count, formatBytes, LANGUAGE_NAMES, timeAgo } from './webviewUtil';
 
 /**
- * Commands behind the report's buttons. They are registered in code but not contributed in
- * package.json, so they stay out of the Command Palette: their only job is to close the report
+ * Commands behind the report's links. They are registered in code but not contributed in
+ * package.json, so they stay out of the Command Palette: their job is to close the report
  * before the real command opens a progress notification or a picker.
  */
 const HOVER_GENERATE = 'refdex.hover.generateIndex';
 const HOVER_SEARCH = 'refdex.hover.searchSymbols';
 const HOVER_OPEN_DB = 'refdex.hover.openDatabase';
+const HOVER_SETTINGS = 'refdex.hover.openSettings';
+const HOVER_TOGGLE_WATCH = 'refdex.hover.toggleWatch';
+/** The ⓘ icons: hovering shows the explanation as a tooltip, clicking shows it as a message. */
+const HOVER_EXPLAIN = 'refdex.hover.explain';
 /** Clicking the status bar item opens its report instead of doing anything by itself. */
 export const SHOW_REPORT = 'refdex.showStatusReport';
 
 const IDLE = '$(refdex-logo)';
 
+const EXPLAIN = {
+  symbols: 'Classes, methods, properties and other declarations. AI assistants look these up by name instead of reading whole files.',
+  imports: 'Imports that point at code in this workspace. Standard-library and third-party imports stay unresolved on purpose.',
+  watch: 'When enabled, saved, created and deleted files are re-indexed within a moment. Only changed files are parsed again.',
+  database: 'The index is a SQLite database in VS Code\'s storage for this workspace, not in your repository. Open it to browse or export its tables.',
+  regenerate: 'Drops the whole index and builds it again from scratch. Normally not needed: the index updates itself as files change.',
+  index: 'RefDex parses Python, TypeScript, Java and C# files into a local symbol index that AI assistants query instead of reading whole files.',
+} as const;
+type Topic = keyof typeof EXPLAIN;
+
+export interface ReportState {
+  stats: IndexStats | undefined;
+  watching: boolean;
+  watchSetting: boolean;
+  dbBytes: number | undefined;
+}
+
 /**
  * The RefDex item in the status bar (right side, next to Copilot). Its tooltip is the index
- * report: what the index holds, and buttons to regenerate it, search it or open the database.
+ * report, styled after Copilot's status popup: sections fenced by rules, a bold title with grey
+ * details on the right, big numbers, thin bars, ⓘ explanations and links as actions.
+ *
+ * It is a Markdown hover, so layout is limited to what VS Code's hover sanitizer lets through:
+ * tables (`width`, `align`), spans coloured with `--vscode-*` theme variables, headings and rules.
+ * Codicons render inside that HTML too. Everything sits in table rows so it lines up: cells have
+ * padding that plain paragraphs do not.
  */
 export class StatusReport implements vscode.Disposable {
   private readonly item = vscode.window.createStatusBarItem('refdex.status', vscode.StatusBarAlignment.Right, 50);
-  private stats: IndexStats | undefined;
-  private watching = false;
+  private state: ReportState = { stats: undefined, watching: false, watchSetting: true, dbBytes: undefined };
   private error: string | undefined;
   private readonly disposables: vscode.Disposable[] = [];
 
@@ -30,7 +56,7 @@ export class StatusReport implements vscode.Disposable {
     this.item.name = 'RefDex';
     this.item.text = IDLE;
     this.item.accessibilityInformation = { label: 'RefDex: code index' };
-    // Clicking opens the report; only its buttons act.
+    // Clicking opens the report; only its links act.
     this.item.command = SHOW_REPORT;
     this.item.tooltip = new vscode.MarkdownString('**RefDex**\n\nReading the index...');
     this.item.show();
@@ -40,12 +66,14 @@ export class StatusReport implements vscode.Disposable {
       vscode.commands.registerCommand(HOVER_GENERATE, () => this.runFromHover('refdex.generateIndex')),
       vscode.commands.registerCommand(HOVER_SEARCH, () => this.runFromHover('refdex.searchSymbols')),
       vscode.commands.registerCommand(HOVER_OPEN_DB, () => this.runFromHover('refdex.openDatabase')),
+      vscode.commands.registerCommand(HOVER_SETTINGS, () => this.runFromHover('workbench.action.openSettings', '@ext:danielonnet.refdex')),
+      vscode.commands.registerCommand(HOVER_TOGGLE_WATCH, () => this.runFromHover('refdex.toggleWatch')),
+      vscode.commands.registerCommand(HOVER_EXPLAIN, (topic: Topic) => vscode.window.showInformationMessage(`RefDex: ${EXPLAIN[topic] ?? ''}`)),
     );
   }
 
-  update(stats: IndexStats | undefined, watching: boolean): void {
-    this.stats = stats;
-    this.watching = watching;
+  update(state: ReportState): void {
+    this.state = state;
     this.error = undefined;
     this.item.text = IDLE;
     this.item.tooltip = this.report();
@@ -53,7 +81,9 @@ export class StatusReport implements vscode.Disposable {
 
   indexing(): void {
     this.item.text = '$(sync~spin)';
-    this.item.tooltip = new vscode.MarkdownString('**RefDex**\n\n$(sync~spin) Indexing...', true);
+    const md = this.markdown();
+    md.appendMarkdown(row('<strong>RefDex</strong>', grey('Indexing…')));
+    this.item.tooltip = md;
   }
 
   failed(message: string): void {
@@ -63,43 +93,69 @@ export class StatusReport implements vscode.Disposable {
   }
 
   noFolder(): void {
-    this.item.tooltip = new vscode.MarkdownString('**RefDex**\n\nOpen a folder to index it.');
+    const md = this.markdown();
+    md.appendMarkdown(row('<strong>RefDex</strong>', ''));
+    md.appendMarkdown('---\n\n');
+    md.appendMarkdown(row(`<strong>Code index</strong> ${info('index')}`, grey('No folder open')));
+    this.item.tooltip = md;
   }
 
-  /** The report as Markdown: counts per language, import resolution, freshness, then actions. */
+  private markdown(): vscode.MarkdownString {
+    const md = new vscode.MarkdownString(undefined, true);
+    md.supportHtml = true;
+    // Links are what a hover has instead of buttons; only RefDex's own commands are trusted.
+    md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_SEARCH, HOVER_OPEN_DB, HOVER_SETTINGS, HOVER_TOGGLE_WATCH, HOVER_EXPLAIN] };
+    return md;
+  }
+
   private report(): vscode.MarkdownString {
-    const md = new vscode.MarkdownString();
-    md.supportThemeIcons = true;
-    // Command links are what a tooltip has instead of buttons; only RefDex's own are trusted.
-    md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_SEARCH, HOVER_OPEN_DB] };
-    md.appendMarkdown('**RefDex — code index**\n\n');
-    const stats = this.stats;
+    const md = this.markdown();
+    const { stats, watching, watchSetting, dbBytes } = this.state;
+    const indexed = !!stats?.files;
+
+    // Title row, with icon buttons on the right like Copilot's.
+    const buttons = indexed
+      ? `${iconLink('search', HOVER_SEARCH, 'Search symbols')} &nbsp;${iconLink('table', HOVER_OPEN_DB, 'Open database')} &nbsp;${iconLink('settings-gear', HOVER_SETTINGS, 'RefDex settings')}`
+      : iconLink('settings-gear', HOVER_SETTINGS, 'RefDex settings');
+    md.appendMarkdown(row('<strong>RefDex</strong>', buttons));
+    md.appendMarkdown('---\n\n');
+
     if (this.error) {
-      md.appendMarkdown(`$(error) ${escapeMd(this.error)}\n\n`);
+      md.appendMarkdown(row(`${colored('$(error)', 'charts-red')} <strong>Last run failed</strong>`, grey('See Output › RefDex')));
+      md.appendMarkdown(row(grey(escapeHtml(this.error)), ''));
+      md.appendMarkdown('---\n\n');
     }
-    if (!stats?.files) {
-      md.appendMarkdown('This workspace has not been indexed yet.');
-      md.appendMarkdown(`\n\n---\n\n[$(play) Generate index](command:${HOVER_GENERATE})`);
+
+    if (!stats || !indexed) {
+      md.appendMarkdown(row(`<strong>Code index</strong> ${info('index')}`, grey('Not indexed')));
+      md.appendMarkdown(link('Index?', HOVER_GENERATE));
       return md;
     }
-    md.appendMarkdown(`$(database) ${count(stats.symbols, 'symbol')} in ${count(stats.files, 'file')}\n\n`);
-    // Per-language counts are their own group, fenced by rules; headings make them stand out.
-    md.appendMarkdown('---\n\n');
+
+    // Symbols: the headline number, then one line per language.
+    md.appendMarkdown(row(`<strong>Symbols</strong> ${info('symbols')}`, grey(stats.indexedAt ? `Updated ${timeAgo(stats.indexedAt)}` : '')));
+    md.appendMarkdown(headline(stats.symbols.toLocaleString(), `in ${count(stats.files, 'file')}`));
     for (const l of stats.byLanguage) {
-      md.appendMarkdown(`### $(symbol-file) ${LANGUAGE_NAMES[l.language] ?? l.language}: ${count(l.symbols, 'symbol')} in ${count(l.files, 'file')}\n\n`);
+      md.appendMarkdown(row(LANGUAGE_NAMES[l.language] ?? l.language, grey(`${count(l.symbols, 'symbol')} · ${count(l.files, 'file')}`)));
     }
     md.appendMarkdown('---\n\n');
-    md.appendMarkdown(`$(references) ${stats.resolvedImports.toLocaleString()} of ${count(stats.imports, 'import')} resolved to workspace code\n\n`);
-    md.appendMarkdown(this.watching ? '$(eye) Updating automatically when files change\n\n' : '$(eye-closed) Not watching for changes (refdex.watch is off)\n\n');
-    if (stats.indexedAt) {
-      md.appendMarkdown(`Last updated ${timeAgo(stats.indexedAt)}.`);
-    }
-    md.appendMarkdown('\n\n---\n\n');
-    md.appendMarkdown(
-      `[$(refresh) Regenerate index](command:${HOVER_GENERATE}) &nbsp;&nbsp; ` +
-        `[$(search) Search symbols](command:${HOVER_SEARCH}) &nbsp;&nbsp; ` +
-        `[$(table) Open database](command:${HOVER_OPEN_DB})`,
-    );
+
+    // Imports: share resolved to workspace code, as a percentage and a bar.
+    const share = stats.imports ? stats.resolvedImports / stats.imports : 0;
+    md.appendMarkdown(row(`<strong>Imports resolved</strong> ${info('imports')}`, grey(`${stats.resolvedImports.toLocaleString()} of ${stats.imports.toLocaleString()}`)));
+    md.appendMarkdown(headline(`${Math.round(share * 100)}%`, 'to workspace code'));
+    md.appendMarkdown(bar(share));
+    md.appendMarkdown('---\n\n');
+
+    // Settings-style rows: name and ⓘ on the left, state on the right, an action link below.
+    md.appendMarkdown(row(`<strong>Watch for changes</strong> ${info('watch')}`, grey(watching ? 'Enabled' : watchSetting ? 'Starting…' : 'Disabled')));
+    md.appendMarkdown(link(watchSetting ? 'Disable?' : 'Enable?', HOVER_TOGGLE_WATCH));
+    md.appendMarkdown('---\n\n');
+    md.appendMarkdown(row(`<strong>Index database</strong> ${info('database')}`, grey(dbBytes !== undefined ? formatBytes(dbBytes) : '')));
+    md.appendMarkdown(link('Open?', HOVER_OPEN_DB));
+    md.appendMarkdown('---\n\n');
+    md.appendMarkdown(row(`<strong>Regenerate index</strong> ${info('regenerate')}`, grey('From scratch')));
+    md.appendMarkdown(link('Regenerate?', HOVER_GENERATE));
     return md;
   }
 
@@ -120,7 +176,7 @@ export class StatusReport implements vscode.Disposable {
    * Closes the report, then runs `command`. VS Code has no API to close a workbench hover; it
    * closes when focus moves away, so focus goes back to the editor (or the status bar) first.
    */
-  private async runFromHover(command: string): Promise<void> {
+  private async runFromHover(command: string, ...args: unknown[]): Promise<void> {
     const run = (c: string) => vscode.commands.executeCommand(c).then(undefined, () => undefined);
     const tooltip = this.item.tooltip;
     this.item.tooltip = new vscode.MarkdownString('**RefDex**');
@@ -128,7 +184,7 @@ export class StatusReport implements vscode.Disposable {
     await run('editor.action.hideHover');
     await new Promise((resolve) => setTimeout(resolve, 80));
     this.item.tooltip = tooltip;
-    await vscode.commands.executeCommand(command);
+    await vscode.commands.executeCommand(command, ...args);
   }
 
   dispose(): void {
@@ -138,6 +194,49 @@ export class StatusReport implements vscode.Disposable {
   }
 }
 
-function escapeMd(text: string): string {
-  return text.replace(/[\\`*_{}[\]()#+\-.!|<>]/g, '\\$&');
+// ---- hover building blocks ----
+
+/** A full-width row: `left` as is, `right` right-aligned. */
+function row(left: string, right: string): string {
+  return `<table width="100%"><tr><td>${left}</td><td align="right">${right}</td></tr></table>\n\n`;
+}
+
+function colored(html: string, color: string): string {
+  return `<span style="color:var(--vscode-${color});">${html}</span>`;
+}
+
+function grey(text: string): string {
+  return colored(text, 'descriptionForeground');
+}
+
+function commandUri(command: string, args?: unknown[]): string {
+  return `command:${command}${args ? `?${encodeURIComponent(JSON.stringify(args))}` : ''}`;
+}
+
+/** A row holding one action link, like Copilot's "Index?". */
+function link(text: string, command: string): string {
+  return row(`<a href="${commandUri(command)}">${text}</a>`, '');
+}
+
+/** The big number of a section, e.g. "93,007 in 3,000 files". */
+function headline(value: string, detail: string): string {
+  return row(`<h2>${value} ${grey(detail)}</h2>`, '');
+}
+
+function iconLink(icon: string, command: string, title: string): string {
+  return `<a href="${commandUri(command)}" title="${escapeHtml(title)}">$(${icon})</a>`;
+}
+
+function info(topic: Topic): string {
+  return `<a href="${commandUri(HOVER_EXPLAIN, [topic])}" title="${escapeHtml(EXPLAIN[topic])}">$(info)</a>`;
+}
+
+/** A thin progress bar, like Copilot's quota bars. */
+function bar(fraction: number, width = 52): string {
+  const filled = Math.round(Math.max(0, Math.min(1, fraction)) * width);
+  return row(colored('━'.repeat(filled), 'charts-blue') + colored('━'.repeat(width - filled), 'charts-lines'), '');
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }

@@ -32,7 +32,7 @@ To run the extension, open `packages/vscode` in VS Code and press F5.
 
 | Script | Purpose |
 | --- | --- |
-| `scripts/build-and-install.sh` | Build `refdex.vsix` and install it into your local VS Code |
+| `scripts/build-and-install.sh [all\|vscode\|intellij]` | Build and install the VS Code extension (`refdex.vsix`) and the IntelliJ plugin (into every JetBrains IDE found); with `all`, a target that can't be built here is skipped |
 | `scripts/uninstall.sh` | Uninstall `danielonnet.refdex` from VS Code |
 | `scripts/publish-marketplace.sh [patch\|minor\|major\|<version>]` | Test, package and publish to the Marketplace (`--dry-run`, `--help`); credentials live in `~/.config/refdex/marketplace.env` |
 | `npm run build:icon-font` | Build `packages/vscode/media/refdex-icons.woff` from `packages/vscode/media/icon.svg` |

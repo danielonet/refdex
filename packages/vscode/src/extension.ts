@@ -37,8 +37,8 @@ export async function activate(context: vscode.ExtensionContext) {
   let stats: IndexStats | undefined;
   const showStats = async (fresh?: IndexStats) => {
     stats = fresh ?? (await daemon.stats().catch(() => undefined));
-    const watching = stats?.files ? (await daemon.info().catch(() => undefined))?.watching ?? false : false;
-    status.update(stats, watching);
+    const info = await daemon.info().catch(() => undefined);
+    status.update({ stats, watching: info?.watching ?? false, watchSetting: options().watch, dbBytes: info?.dbBytes });
     void about.refresh(stats);
     void vscode.commands.executeCommand('setContext', 'refdex.indexed', !!stats?.files);
   };
@@ -94,6 +94,13 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('refdex.openDatabase', () => openDatabase(context, daemon)),
     vscode.commands.registerCommand('refdex.browseDatabase', browse),
     vscode.commands.registerCommand('refdex.exportCsv', () => exportCsv(daemon)),
+    vscode.commands.registerCommand('refdex.toggleWatch', async () => {
+      // Change the setting where it is set, so a workspace value does not shadow the change.
+      const cfg = vscode.workspace.getConfiguration('refdex');
+      const inspected = cfg.inspect<boolean>('watch');
+      const target = inspected?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+      await cfg.update('watch', !options().watch, target);
+    }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('refdex')) {
         log.appendLine('settings changed; restarting the daemon');
