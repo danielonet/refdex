@@ -1,0 +1,4 @@
+{
+  "name": "@fx/lib",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } }
+}

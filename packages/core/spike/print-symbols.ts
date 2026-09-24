@@ -3,7 +3,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { extractSymbols, languageForPath, TreeSitter, type ExtractedSymbol } from '../src/index.ts';
+import { languageForPath, TreeSitter, type ExtractedSymbol } from '../src/index.ts';
 
 const samplesDir = join(import.meta.dirname, 'samples');
 const files = process.argv.length > 2
@@ -20,18 +20,19 @@ for (const file of files) {
   }
   const source = await readFile(file, 'utf8');
   const t0 = performance.now();
-  const { tree, lang: loaded } = await ts.parse(lang, source);
-  const result = extractSymbols(tree, loaded);
+  const result = await ts.parseFile(file, lang, source);
   const ms = (performance.now() - t0).toFixed(1);
 
   console.log(`\n${relative(process.cwd(), file)} (${lang}) - ${result.symbols.length} symbols, ${result.imports.length} imports, ${ms} ms${result.hasErrors ? ', HAS PARSE ERRORS' : ''}`);
-  for (const imp of result.imports) console.log(`  import     L${imp.line}  ${imp.text}`);
+  for (const imp of result.imports) {
+    const names = imp.names.map((n) => (n.alias ? `${n.name} as ${n.alias}` : n.name)).join(', ');
+    console.log(`  ${imp.kind.padEnd(11)}L${imp.line}  ${imp.global ? 'global ' : ''}${imp.spec}${names ? ` [${names}]` : ''}${imp.alias ? ` as ${imp.alias}` : ''}`);
+  }
   for (const sym of result.symbols) {
     const depth = ancestors(sym);
     const range = `[${sym.startLine}-${sym.endLine}]`;
-    console.log(`  ${'  '.repeat(depth)}${sym.kind.padEnd(11)}${sym.qualifiedName} ${range}  (${sym.nativeKind})\n  ${'  '.repeat(depth)}           ${sym.signature}`);
+    console.log(`  ${'  '.repeat(depth)}${sym.kind.padEnd(11)}${sym.qualifiedName} ${range}  (${sym.nativeKind})${sym.exported ? ' exported' : ''}${sym.partial ? ' partial' : ''}\n  ${'  '.repeat(depth)}           ${sym.signature}${sym.doc ? `\n  ${'  '.repeat(depth)}           doc: ${sym.doc}` : ''}`);
   }
-  tree.delete();
 }
 
 function ancestors(sym: ExtractedSymbol): number {

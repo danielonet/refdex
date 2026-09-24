@@ -39,7 +39,7 @@ flowchart TD
     D --> F[Copilot agent mode]
 ```
 
-- **Daemon (shared, TypeScript):** tree-sitter parsing via `web-tree-sitter`, language adapters, file watching via `@parcel/watcher`, SQLite writes, and the MCP server (MCP TypeScript SDK, stdio). SQLite is Node's built-in `node:sqlite` (FTS5 included), so there is no native module to package.
+- **Daemon (shared, TypeScript):** tree-sitter parsing via `web-tree-sitter`, language adapters, file watching via Node's `fs.watch` (see Phase 1 notes), SQLite writes, and the MCP server (MCP TypeScript SDK, stdio). SQLite is Node's built-in `node:sqlite` (FTS5 included), so there is no native module to package.
 - **Distribution:** shipped as a single executable per platform (Node single-executable apps or `bun build --compile`) so users don't need Node installed.
 - **VS Code extension (TypeScript):** registers the daemon for Copilot via `vscode.lm.registerMcpServerDefinitionProvider`, writes the Claude Code `.mcp.json` entry, status bar, commands, settings.
 - **IntelliJ plugin (Kotlin):** launches the daemon, writes MCP config, status widget, reindex action, settings. Does not use IntelliJ's PSI, so there is only one indexer to maintain.
@@ -139,15 +139,34 @@ Phase 0 findings (2026-09-23):
 
 ### Phase 1: Core indexer
 
-- [ ] Create schema, including `symbols_fts` and `symbol_parts`
-- [ ] Define `LanguageAdapter` interface and extension-to-adapter registry
-- [ ] Python and TypeScript adapters with path-based import resolution
-- [ ] Handle `tsconfig` path aliases and barrel re-exports
-- [ ] Java adapter plus shared namespace-to-files resolver
-- [ ] C# adapter with partial-class merging and global usings
-- [ ] Full workspace scan respecting `.gitignore`
-- [ ] Hash-based incremental updates via file watcher
-- [ ] Move indexing to a worker thread
+- [x] Create schema, including `symbols_fts` and `symbol_parts`
+- [x] Define `LanguageAdapter` interface and extension-to-adapter registry
+- [x] Python and TypeScript adapters with path-based import resolution
+- [x] Handle `tsconfig` path aliases and barrel re-exports
+- [x] Java adapter plus shared namespace-to-files resolver
+- [x] C# adapter with partial-class merging and global usings
+- [x] Full workspace scan respecting `.gitignore`
+- [x] Hash-based incremental updates via file watcher
+- [x] Move indexing to a worker thread
+
+Phase 1 notes (2026-09-23):
+
+- **Layout:** `packages/core` holds the adapters (`src/adapters/`), `Workspace` (scan, `.gitignore`, project roots, tsconfig, workspace packages), `IndexDb` (schema and queries) and `Indexer`. `packages/server` holds the CLI and `refdex serve`.
+- **Two-pass indexing:** changed files are parsed and stored with their raw imports, then imports are resolved against the whole index. Each run re-resolves the changed files' imports plus every unresolved import, so a new file can satisfy older imports.
+- **Qualified names:** Python uses dotted module paths (`shop.orders.Order.total`), TypeScript uses module path plus `:` (`src/models/order:OrderModel.total`), and Java and C# use package or namespace (`com.acme.model.Invoice.Line`).
+- **Import resolution:**
+  - Python: relative imports, `src/` layouts and `from pkg import submodule`.
+  - TypeScript: tsconfig `paths`/`baseUrl` with `extends` and JSONC, `.js`→`.ts`, index files, and monorepo packages via `package.json` `exports`, mapped back to `src/`.
+  - Java: types, nested types, wildcard and static imports.
+  - C#: `using`, `using static` and `using X =`. `global using` applies per `.csproj` project.
+  - Standard-library and third-party imports stay unresolved.
+- **Barrels:** `IndexDb.resolveExport` follows `export *` and `export { a as b } from` to the defining symbol.
+- **Partial classes:** the part with the lowest id is canonical, every part is listed in `symbol_parts`, the other parts set `merged_into`, and search shows the type once.
+- **Watcher (deviation):** Node's `fs.watch` instead of `@parcel/watcher`, which is a native module and would complicate the single executable and the `.vsix`. macOS and Windows use the native recursive mode. On Linux each non-ignored folder is watched separately, because Node's recursive mode also watches `node_modules`.
+- **Daemon:** `refdex serve` speaks JSON lines on stdio. Indexing runs in a worker thread with its own write connection, and queries are answered from a WAL reader. The single executable runs the worker from its embedded bundle.
+- **Performance (synthetic, 3,000 TypeScript files, 93k symbols):** full index 8.6 s, no-change rescan 0.5 s, saved file 34 ms through the watcher path. Adding indexes on every foreign key cut the saved-file time from 620 ms.
+- **Tests:** a fixture project per language in `packages/core/test/fixtures`. There are 24 core tests and 2 daemon tests; run them with `npm test`.
+- **Known gaps:** C# implicit usings (`<ImplicitUsings>`) are not modeled. Python `sys.path` tricks and dynamic imports stay unresolved. A partial type's doc comment comes from its canonical part only.
 
 ### Phase 2: MCP server
 

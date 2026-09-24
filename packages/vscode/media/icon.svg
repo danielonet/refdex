@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+  <!-- RefDex logo: a code outline (class with two members), drawn as filled paths only so it can
+       also become an icon-font glyph (scripts/build-icon-font.js). Used as the activity bar icon. -->
+  <path d="M2 2H14V8H2Z"/>
+  <path d="M4.5 8H7V20.5H4.5Z"/>
+  <path d="M7 11.5H10V14H7Z"/>
+  <path d="M7 18H10V20.5H7Z"/>
+  <path d="M10 10H22V15.5H10Z"/>
+  <path d="M10 16.5H18.5V22H10Z"/>
+</svg>

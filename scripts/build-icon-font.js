@@ -6,6 +6,9 @@
  * be a glyph. The font is registered in packages/vscode/package.json under `contributes.icons`
  * as `refdex-logo`, which the extension then uses as `$(refdex-logo)`.
  *
+ * The Marketplace / Extensions view icon (media/icon.png) is a separate, full-colour image made
+ * from media/icon-source.png; icon.svg is the monochrome version for the activity and status bars.
+ *
  * Run after changing the logo:  npm run build:icon-font
  * The generated .woff is committed, so a normal build needs no font tooling.
  */
@@ -80,6 +83,7 @@ async function main() {
   fs.writeFileSync(OUTPUT, Buffer.from(ttf2woff(new Uint8Array(ttf.buffer)).buffer));
   console.log(`Wrote ${path.relative(process.cwd(), OUTPUT)} (${fs.statSync(OUTPUT).size} bytes), glyph U+${CODE_POINT.toString(16).toUpperCase()} at ${Math.round(GLYPH_SCALE * 100)}% of the em box`);
   if (process.env.REFDEX_ICON_TTF) fs.writeFileSync(process.env.REFDEX_ICON_TTF, Buffer.from(ttf.buffer));
+
 }
 
 main().catch((err) => {

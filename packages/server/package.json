@@ -9,9 +9,10 @@
   },
   "scripts": {
     "check-types": "tsc -p .",
-    "dev": "node src/main.ts",
+    "dev": "node --disable-warning=ExperimentalWarning src/main.ts",
     "build": "node scripts/build.mjs",
-    "build:sea": "node scripts/build.mjs && node scripts/build-sea.mjs"
+    "build:sea": "node scripts/build.mjs && node scripts/build-sea.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@refdex/core": "*"

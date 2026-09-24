@@ -7,8 +7,8 @@ See [docs/refdex-project-plan.md](docs/refdex-project-plan.md) for the plan.
 
 | Path | Contents |
 | --- | --- |
-| `packages/core` | Tree-sitter parsing, symbol extraction, (later) language adapters and database |
-| `packages/server` | The `refdex` daemon: SQLite index, (later) file watcher and MCP server; builds to a single executable |
+| `packages/core` | Language adapters, workspace scan, SQLite index and incremental indexer |
+| `packages/server` | The `refdex` CLI and daemon (`refdex serve`: worker-thread indexing, file watcher, (later) MCP); builds to a single executable |
 | `packages/vscode` | VS Code extension (scaffolded with `yo code`) |
 | `plugins/intellij` | IntelliJ plugin (Phase 6) |
 
@@ -20,6 +20,7 @@ Requires Node 22.18+ (TypeScript runs directly through Node's type stripping).
 npm install
 npm run spike              # print symbols from one sample file per language
 npm run check-types        # typecheck all workspaces
+npm test                   # adapter, indexer and daemon tests
 npm run build              # bundle the daemon and the VS Code extension
 npm run build:sea          # build the single executable packages/server/dist/refdex
 packages/server/dist/refdex selftest

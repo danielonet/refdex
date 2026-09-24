@@ -9,9 +9,11 @@
   },
   "scripts": {
     "check-types": "tsc -p .",
-    "spike": "node spike/print-symbols.ts"
+    "spike": "node --disable-warning=ExperimentalWarning spike/print-symbols.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\""
   },
   "dependencies": {
+    "ignore": "^7.0.10",
     "tree-sitter-c-sharp": "^0.23.5",
     "tree-sitter-java": "^0.23.5",
     "tree-sitter-python": "^0.25.0",

@@ -11,9 +11,11 @@ const platform = process.platform;
 const exe = platform === 'win32' ? 'dist/refdex.exe' : 'dist/refdex';
 const run = (cmd, args) => execFileSync(cmd, args, { stdio: 'inherit' });
 
-const assets = Object.fromEntries(
-  Object.entries(WASM_MODULE_PATHS).map(([file, modulePath]) => [file, require.resolve(modulePath)]),
-);
+const assets = {
+  ...Object.fromEntries(Object.entries(WASM_MODULE_PATHS).map(([file, modulePath]) => [file, require.resolve(modulePath)])),
+  // The index worker thread re-runs the bundle from this asset (see src/worker.ts).
+  'refdex.cjs': 'dist/refdex.cjs',
+};
 writeFileSync('dist/sea-config.json', JSON.stringify({
   main: 'dist/refdex.cjs',
   output: 'dist/refdex.blob',

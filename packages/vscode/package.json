@@ -3,22 +3,144 @@
   "displayName": "RefDex",
   "description": "Method-level code index for AI assistants (Claude Code, Copilot) via MCP",
   "publisher": "danielonnet",
+  "icon": "media/icon.png",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.101.0"
   },
   "categories": [
+    "Programming Languages",
+    "AI",
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "refdex.helloWorld",
-        "title": "Hello World"
+        "command": "refdex.generateIndex",
+        "title": "Generate / Regenerate Index",
+        "category": "RefDex",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "refdex.updateIndex",
+        "title": "Update Index (changed files only)",
+        "category": "RefDex"
+      },
+      {
+        "command": "refdex.searchSymbols",
+        "title": "Search Symbols",
+        "category": "RefDex",
+        "icon": "$(search)"
+      },
+      {
+        "command": "refdex.openDatabase",
+        "title": "Open Database\u2026",
+        "category": "RefDex",
+        "icon": "$(table)"
+      },
+      {
+        "command": "refdex.browseDatabase",
+        "title": "Browse Database",
+        "category": "RefDex"
+      },
+      {
+        "command": "refdex.exportCsv",
+        "title": "Export Table to CSV\u2026",
+        "category": "RefDex"
+      },
+      {
+        "command": "refdex.showLog",
+        "title": "Show Log",
+        "category": "RefDex"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "refdex",
+          "title": "RefDex",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "refdex": [
+        {
+          "id": "refdex.about",
+          "name": "About",
+          "type": "webview",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "refdex.searchSymbols",
+          "when": "view == refdex.about && refdex.indexed",
+          "group": "navigation@1"
+        },
+        {
+          "command": "refdex.openDatabase",
+          "when": "view == refdex.about && refdex.indexed",
+          "group": "navigation@2"
+        },
+        {
+          "command": "refdex.generateIndex",
+          "when": "view == refdex.about",
+          "group": "navigation@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "refdex.searchSymbols",
+          "when": "refdex.indexed"
+        },
+        {
+          "command": "refdex.openDatabase",
+          "when": "refdex.indexed"
+        },
+        {
+          "command": "refdex.browseDatabase",
+          "when": "refdex.indexed"
+        },
+        {
+          "command": "refdex.exportCsv",
+          "when": "refdex.indexed"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "RefDex",
+      "properties": {
+        "refdex.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra paths to leave out of the index, in `.gitignore` syntax relative to the workspace root (for example `generated/` or `**/*.test.ts`). `.gitignore` files and folders such as `node_modules`, `dist`, `bin`, `obj` and `.venv` are always excluded."
+        },
+        "refdex.watch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep the index up to date automatically when files change. When off, use Generate / Regenerate Index to update it."
+        }
+      }
+    },
+    "icons": {
+      "refdex-logo": {
+        "description": "RefDex logo",
+        "default": {
+          "fontPath": "media/refdex-icons.woff",
+          "fontCharacter": "\\E001"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -44,7 +166,8 @@
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
     "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "@vscode/test-electron": "^3.0.0",
+    "@refdex/server": "*"
   },
   "overrides": {
     "diff": "^8.0.4",
