@@ -170,10 +170,21 @@ Phase 1 notes (2026-09-23):
 
 ### Phase 2: MCP server
 
-- [ ] Stdio server with MCP TypeScript SDK, read-only database
-- [ ] `search_symbols`, `get_file_outline`, `get_symbol_source`, `find_references`
-- [ ] Test with MCP Inspector
-- [ ] Test with Claude Code on a real project
+- [x] Stdio server with MCP TypeScript SDK, read-only database
+- [x] `search_symbols`, `get_file_outline`, `get_symbol_source`, `find_references`
+- [x] Test with MCP Inspector
+- [x] Test with Claude Code on a real project
+
+Phase 2 notes (2026-09-24):
+
+- **Server:** `refdex mcp --root <dir> [--db <file>]` runs a stdio MCP server (MCP TypeScript SDK 1.30, zod 4) over a read-only connection. It starts even without an index, and each tool then explains how to build one. `REFDEX_ROOT` and `REFDEX_DB` can replace the flags in client configs. The default database is `<root>/.refdex/index.db`.
+- **Output:** tools return compact plain text: workspace-relative paths, line ranges, signatures and the first sentence of each doc comment. Every answer starts with the index's freshness, and code whose file changed since indexing is flagged. Source is always read from disk.
+- **Tool behavior:**
+  - `search_symbols` ranks exact name matches first, then prefixes, then full-text relevance.
+  - `get_symbol_source` accepts a plain name when it's unique, and lists candidates when it's ambiguous. It returns every overload and partial-class part. A type longer than `max_lines` (default 250) returns its member list instead.
+- **`find_references` (interim):** matches the name by word in the files that can see the symbol. Those are its own files, files importing them (following barrel re-exports), and for Java/C# the files sharing or importing its package or namespace (including `global using`). It ignores the declaration line. The call-graph `edges` of Phase 4 will make it exact. `with_callees` moved to Phase 4 together with the edges.
+- **MCP Inspector (2.8, CLI with an `mcpServers` config):** the tools list correctly and `--strict` reports no schema portability problems.
+- **Claude Code (2.1.281, Pyrite repo):** asked where `RuleBasedTranslator.translate` is and who calls `createTranslator`, it used `get_symbol_source` and `find_references` unprompted. It answered correctly (checked against grep) in 4 turns with about 2.3 KB of tool output.
 
 ### Phase 3: VS Code extension and client detection
 

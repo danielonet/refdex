@@ -26,6 +26,27 @@ npm run build:sea          # build the single executable packages/server/dist/re
 packages/server/dist/refdex selftest
 ```
 
+### Using the MCP server
+
+Index a project, then point an MCP client at `refdex mcp`, for example in Claude Code's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "refdex": {
+      "command": "node",
+      "args": ["/path/to/refdex/packages/server/dist/refdex.cjs", "mcp", "--root", "/path/to/project"]
+    }
+  }
+}
+```
+
+```sh
+node packages/server/dist/refdex.cjs index --root /path/to/project   # writes /path/to/project/.refdex/index.db
+```
+
+Tools: `search_symbols`, `get_file_outline`, `get_symbol_source`, `find_references`. The VS Code extension will register this automatically (Phase 3).
+
 To run the extension, open `packages/vscode` in VS Code and press F5.
 
 ## Scripts

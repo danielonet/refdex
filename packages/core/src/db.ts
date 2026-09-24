@@ -144,10 +144,22 @@ export class IndexDb {
   readonly db: Database;
   private readonly statements = new Map<string, StatementSync>();
 
-  constructor(path: string) {
-    this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;');
+  /**
+   * `readOnly`: for query-only processes such as the MCP server. The database must already exist
+   * with the current schema; the daemon (the only writer) creates and updates it.
+   */
+  constructor(path: string, opts: { readOnly?: boolean } = {}) {
+    this.db = new DatabaseSync(path, { readOnly: !!opts.readOnly });
+    this.db.exec('PRAGMA busy_timeout = 5000;');
     const { user_version: version } = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (opts.readOnly) {
+      if (version !== SCHEMA_VERSION) {
+        this.db.close();
+        throw new IndexNotReadyError(version === 0 ? 'the index has not been built yet' : 'the index was built by a different RefDex version');
+      }
+      return;
+    }
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;');
     if (version !== SCHEMA_VERSION) this.reset();
   }
 
@@ -311,8 +323,11 @@ export class IndexDb {
        FROM symbols_fts JOIN symbols s ON s.id = symbols_fts.rowid JOIN files f ON f.id = s.file_id
        WHERE symbols_fts MATCH ? AND s.merged_into IS NULL
          AND (?2 IS NULL OR s.kind = ?2) AND (?3 IS NULL OR f.language = ?3)
-       ORDER BY bm25(symbols_fts, 10.0, 2.0, 0.5) LIMIT ?4`,
-    ).all(`{name qualified_name}: (${match})`, opts.kind ?? null, opts.language ?? null, limit) as unknown as SymbolRow[];
+       -- Exact name matches first, then name prefixes, then the full-text rank.
+       ORDER BY s.name = ?5 COLLATE NOCASE DESC, substr(s.name, 1, length(?5)) = ?5 COLLATE NOCASE DESC,
+         bm25(symbols_fts, 10.0, 2.0, 0.5), length(s.qualified_name)
+       LIMIT ?4`,
+    ).all(`{name qualified_name}: (${match})`, opts.kind ?? null, opts.language ?? null, limit, query.trim()) as unknown as SymbolRow[];
   }
 
   symbolsByQualifiedName(qualifiedName: string): SymbolRow[] {
@@ -409,6 +424,61 @@ export class IndexDb {
        FROM files`,
     ).get() as { indexedAt: string | null; imports: number; resolvedImports: number };
     return { ...this.counts(), ...row, byLanguage };
+  }
+
+  fileInfo(path: string): { id: number; language: LanguageId; hash: string; indexed_at: string } | undefined {
+    return this.stmt('SELECT id, language, hash, indexed_at FROM files WHERE path = ?').get(path) as
+      { id: number; language: LanguageId; hash: string; indexed_at: string } | undefined;
+  }
+
+  /** Symbols whose name is `name`, or whose qualified name ends with it after a `.` or `:`. */
+  symbolsByName(name: string, limit = 50): SymbolRow[] {
+    return this.stmt(
+      `SELECT ${SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+       WHERE (s.name = ?1 OR s.qualified_name LIKE '%.' || ?2 ESCAPE '\\' OR s.qualified_name LIKE '%:' || ?2 ESCAPE '\\')
+         AND s.merged_into IS NULL
+       ORDER BY length(s.qualified_name), s.id LIMIT ?3`,
+    ).all(name, name.replace(/[\\%_]/g, (c) => `\\${c}`), limit) as unknown as SymbolRow[];
+  }
+
+  /** The given files plus every file that re-exports them, directly or through other barrels. */
+  exportingFiles(fileIds: number[]): number[] {
+    const rows = this.stmt(
+      `WITH RECURSIVE exporting(id) AS (
+         SELECT value FROM json_each(?)
+         UNION
+         SELECT i.file_id FROM imports i JOIN exporting e ON i.resolved_file_id = e.id WHERE i.kind = 're-export'
+       ) SELECT id FROM exporting`,
+    ).all(JSON.stringify(fileIds)) as { id: number }[];
+    return rows.map((r) => r.id);
+  }
+
+  /** Files with an import that resolves to one of `fileIds`. */
+  importingFiles(fileIds: number[]): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT f.path FROM imports i JOIN files f ON f.id = i.file_id
+       WHERE i.resolved_file_id IN (SELECT value FROM json_each(?)) ORDER BY f.path`,
+    ).all(JSON.stringify(fileIds)) as { path: string }[];
+    return rows.map((r) => r.path);
+  }
+
+  /**
+   * Files that see a Java package's or C# namespace's members without importing their file: files
+   * declaring symbols in the same namespace, files importing the namespace (`import a.b.*`,
+   * `using A.B`), and, for C# `global using`, every file of that project.
+   */
+  namespaceFiles(namespace: string, language: LanguageId): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT f.path FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.namespace = ?1 AND f.language = ?2
+       UNION
+       SELECT f.path FROM imports i JOIN files f ON f.id = i.file_id WHERE i.resolved_namespace = ?1 AND f.language = ?2
+       UNION
+       SELECT f.path FROM files f WHERE f.language = ?2 AND f.project IN (
+         SELECT gf.project FROM imports gi JOIN files gf ON gf.id = gi.file_id
+         WHERE gi.is_global = 1 AND gi.resolved_namespace = ?1)
+       ORDER BY 1`,
+    ).all(namespace, language) as { path: string }[];
+    return rows.map((r) => r.path);
   }
 
   /** Moves WAL contents into the main file, so tools that read only the .db file see everything. */
@@ -531,3 +601,6 @@ function csvField(value: unknown): string {
   const text = String(value);
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
+
+/** Thrown by a read-only IndexDb when there is no usable index yet. */
+export class IndexNotReadyError extends Error {}

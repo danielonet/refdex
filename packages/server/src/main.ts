@@ -1,10 +1,11 @@
 import './quiet-sqlite-warning.ts';
 import { mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import * as sea from 'node:sea';
 import { parseArgs } from 'node:util';
 import { isMainThread } from 'node:worker_threads';
 import { BROWSE_TABLES, IndexDb, Indexer, TreeSitter, type BrowseTable, type LanguageId } from '@refdex/core';
+import { serveMcp } from './mcp.ts';
 import { serve } from './serve.ts';
 import { wasmLoader } from './wasm.ts';
 import { runIndexWorker } from './worker.ts';
@@ -22,6 +23,7 @@ const SELFTEST_SOURCES: Record<LanguageId, string> = {
 const USAGE = `refdex ${VERSION}
 Usage:
   refdex serve --root <dir> [--db <file>]    daemon for IDE plugins (JSON lines on stdio, see serve.ts)
+  refdex mcp --root <dir> [--db <file>]      MCP server (stdio) for Claude Code, Copilot and other AI clients
   refdex index --root <dir> [--db <file>]    index a folder once; unchanged files are skipped
   refdex export <table> <out.csv> [--db <file>]  write files|symbols|imports|symbol_parts|edges as CSV
   refdex search <query> [--db <file>]        full-text search over symbol names
@@ -30,18 +32,19 @@ Usage:
   refdex selftest                            parse one snippet per language
   refdex --version
 Options:
-  --db <file>   index database (default: refdex.db)
+  --db <file>   index database (default: <root>/.refdex/index.db with --root, else refdex.db)
   --json        machine-readable output
   --limit <n>   maximum search results (default: 20)
   --exclude <pattern>  gitignore-style pattern to leave out (repeatable; serve and index)
-  --no-watch    serve: do not watch files for changes`;
+  --no-watch    serve: do not watch files for changes
+Environment: REFDEX_ROOT and REFDEX_DB stand in for --root and --db.`;
 
 async function main(argv: string[]): Promise<number> {
   const { values: opts, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
-      db: { type: 'string', default: 'refdex.db' },
+      db: { type: 'string' },
       root: { type: 'string' },
       json: { type: 'boolean', default: false },
       limit: { type: 'string', default: '20' },
@@ -56,6 +59,9 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   const [command, ...args] = positionals;
+  // Environment fallbacks, for MCP client configs and tools that pass settings that way.
+  opts.root ??= process.env.REFDEX_ROOT || undefined;
+  opts.db ??= process.env.REFDEX_DB || (opts.root ? join(resolve(opts.root), '.refdex', 'index.db') : 'refdex.db');
   const print = (json: unknown, text: () => string) => console.log(opts.json ? JSON.stringify(json) : text());
   if (command === 'serve' || command === 'index') mkdirSync(dirname(resolve(opts.db)), { recursive: true });
   const root = () => {
@@ -67,6 +73,9 @@ async function main(argv: string[]): Promise<number> {
     case 'serve':
       await serve(root(), resolve(opts.db), { exclude: opts.exclude, watch: opts.watch });
       return -1; // keeps running until stdin closes
+    case 'mcp':
+      await serveMcp(root(), resolve(opts.db), VERSION);
+      return -1; // keeps running until the client disconnects
     case 'selftest':
       return selftest();
     case 'index': {
