@@ -12,6 +12,9 @@ export interface UsageRecord {
   client: string;
   clientVersion?: string;
   event?: 'connect';
+  /** On `connect`: whether the tools are offered, and why (see ToolsDecision). */
+  tools?: boolean;
+  reason?: string;
   tool?: string;
   /** The tool's arguments, long strings clipped. */
   args?: Record<string, unknown>;

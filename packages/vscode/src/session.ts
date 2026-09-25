@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import type { AboutViewProvider } from './aboutView';
 import {
   CLAUDE_CODE_ID, ClaudeCodeSetup, COPILOT_CHAT_ID, isInstalled, serverCommand,
-  type ClaudeScope, type ClientState, type ServerCommand,
+  type AiToolsSettings, type ClaudeScope, type ClientState, type ServerCommand,
 } from './clients';
 import { Daemon, type DaemonOptions, type IndexStats } from './daemon';
 import { DatabaseBrowser } from './databaseBrowser';
@@ -20,6 +20,17 @@ export function daemonOptions(): DaemonOptions {
     languages: cfg.get<string[]>('languages', []),
     watch: cfg.get<boolean>('watch', true),
   };
+}
+
+export function aiToolsSettings(): AiToolsSettings {
+  const cfg = vscode.workspace.getConfiguration('refdex');
+  return { mode: cfg.get<AiToolsSettings['mode']>('aiTools', 'auto'), minTokens: cfg.get<number>('aiToolsMinTokens', 100_000) };
+}
+
+/** Whether AI clients get RefDex's tools for this folder, and why. */
+export interface AiToolsState {
+  enabled: boolean;
+  reason: string;
 }
 
 /** What every folder session shares: the extension's UI and its Copilot registration. */
@@ -58,6 +69,8 @@ export class FolderSession implements vscode.Disposable {
   readonly daemon: Daemon;
   readonly claude: ClaudeCodeSetup;
   private stats: IndexStats | undefined;
+  /** Last decision, to notice when the codebase crosses the threshold. */
+  private toolsEnabled: boolean | undefined;
   private indexing: Thenable<void> | undefined;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly timers = new Set<NodeJS.Timeout>();
@@ -86,7 +99,33 @@ export class FolderSession implements vscode.Disposable {
   }
 
   mcpCommand(): ServerCommand {
-    return serverCommand(this.ctx.context.extensionUri, this.root, this.dbPath);
+    return serverCommand(this.ctx.context.extensionUri, this.root, this.dbPath, aiToolsSettings());
+  }
+
+  /**
+   * Whether the tools are worth offering: the same rule as the MCP server's (server/src/mcp.ts),
+   * which each client's server applies again on its own. Their definitions cost about 1,200
+   * tokens per request, more than they save on a small codebase.
+   */
+  aiTools(): AiToolsState {
+    const { mode, minTokens } = aiToolsSettings();
+    if (mode === 'always') {
+      return { enabled: true, reason: 'always on (settings)' };
+    }
+    if (mode === 'never') {
+      return { enabled: false, reason: 'turned off in settings' };
+    }
+    if (!this.stats?.files) {
+      return { enabled: false, reason: 'no index yet' };
+    }
+    const tokens = Math.round(this.stats.codeChars / 4);
+    const size = `~${tokens.toLocaleString()} tokens of code (threshold ${minTokens.toLocaleString()})`;
+    return tokens >= minTokens ? { enabled: true, reason: size } : { enabled: false, reason: `small codebase: ${size}` };
+  }
+
+  /** Copilot's server definition: none while the tools are off, so Copilot doesn't start it at all. */
+  copilotCommand(): ServerCommand | undefined {
+    return this.aiTools().enabled ? this.mcpCommand() : undefined;
   }
 
   async clientState(): Promise<ClientState> {
@@ -138,12 +177,21 @@ export class FolderSession implements vscode.Disposable {
   }
 
   async showStats(fresh?: IndexStats): Promise<void> {
-    this.stats = fresh ?? (await this.daemon.stats().catch(() => undefined));
+    // Keep the last known stats while the daemon restarts (a settings change) rather than
+    // briefly showing no index.
+    this.stats = fresh ?? (await this.daemon.stats().catch(() => undefined)) ?? this.stats;
     const info = await this.daemon.info().catch(() => undefined);
+    const aiTools = this.aiTools();
     this.ctx.status.update({
-      stats: this.stats, watching: info?.watching ?? false, watchSetting: daemonOptions().watch, dbBytes: info?.dbBytes, folder: this.folderInfo(),
+      stats: this.stats, watching: info?.watching ?? false, watchSetting: daemonOptions().watch, dbBytes: info?.dbBytes, folder: this.folderInfo(), aiTools,
     });
+    this.ctx.about.aiTools = aiTools;
     void this.ctx.about.refresh(this.stats);
+    if (aiTools.enabled !== this.toolsEnabled) {
+      this.ctx.log.info(`AI tools ${aiTools.enabled ? 'on' : 'off'}: ${aiTools.reason}`);
+      this.toolsEnabled = aiTools.enabled;
+      this.ctx.copilot?.refresh();
+    }
     void vscode.commands.executeCommand('setContext', 'refdex.indexed', this.indexed);
   }
 
@@ -190,7 +238,8 @@ export class FolderSession implements vscode.Disposable {
   private logUsage(r: UsageRecord): void {
     const who = `${clientName(r.client)}${r.clientVersion ? ` ${r.clientVersion}` : ''}`;
     if (r.event === 'connect') {
-      this.ctx.log.info(`MCP ${who} connected`);
+      const tools = r.tools === undefined ? '' : `; tools ${r.tools ? 'on' : 'off'}${r.reason ? ` (${r.reason})` : ''}`;
+      this.ctx.log.info(`MCP ${who} connected${tools}`);
       return;
     }
     const args = Object.entries(r.args ?? {}).map(([k, v]) => ` ${k}=${JSON.stringify(v)}`).join('');
@@ -231,11 +280,13 @@ export class FolderSession implements vscode.Disposable {
       }));
   }
 
-  /** Settings changed: restart the daemon with them. */
+  /** Settings changed: restart the daemon with them, and point AI clients at the new tool settings. */
   restart(): void {
     this.ctx.log.info('settings changed; restarting the daemon');
     this.daemon.restart(daemonOptions());
     void this.showStats();
+    this.ctx.copilot?.refresh();
+    void this.claude.refreshIfStale(this.mcpCommand());
   }
 
   /** Adds (or removes) RefDex in Claude Code's MCP settings for this folder, in the scope the user picks. */
@@ -258,9 +309,11 @@ export class FolderSession implements vscode.Disposable {
       },
       ...(current ? [{ label: '$(trash) Disconnect', detail: `Remove RefDex from Claude Code (${current.scope === 'local' ? 'your settings' : '.mcp.json'})`, disconnect: true }] : []),
     ];
+    const tools = this.aiTools();
     const picked = await vscode.window.showQuickPick(items, {
       title: `Connect RefDex to Claude Code for ${this.folder.name}`,
-      placeHolder: 'Where should Claude Code find RefDex?',
+      // Connecting a small codebase is allowed; say that its tools stay off until it grows.
+      placeHolder: tools.enabled ? 'Where should Claude Code find RefDex?' : `RefDex's tools stay off until they pay off (${tools.reason}). Where should Claude Code find RefDex?`,
     });
     if (!picked) {
       return;
@@ -291,7 +344,8 @@ export class FolderSession implements vscode.Disposable {
     const state = this.ctx.context.workspaceState;
     // A single-folder window keeps the key it always had.
     const key = vscode.workspace.workspaceFile ? `refdex.claudeOffer:${this.root}` : 'refdex.claudeOffer';
-    if (state.get(key) || !(isInstalled(CLAUDE_CODE_ID) || this.claude.cli()) || (await this.claude.current())) {
+    // Only where it pays off: on a small codebase the tools cost Claude more tokens than they save.
+    if (!this.aiTools().enabled || state.get(key) || !(isInstalled(CLAUDE_CODE_ID) || this.claude.cli()) || (await this.claude.current())) {
       return;
     }
     await state.update(key, 'shown');

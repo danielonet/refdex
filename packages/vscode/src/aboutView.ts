@@ -15,6 +15,8 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
   private stats: IndexStats | undefined;
   /** Set by the extension once AI clients have been detected. */
   clients: ClientState | undefined;
+  /** Whether AI clients get the tools, set with each index update. */
+  aiTools: { enabled: boolean; reason: string } | undefined;
   /** The daemon of the indexed folder; replaced when the user switches folders. */
   private daemon: Daemon | undefined;
 
@@ -30,6 +32,7 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
     this.daemon = daemon;
     this.stats = undefined;
     this.clients = undefined;
+    this.aiTools = undefined;
     void this.refresh();
   }
 
@@ -160,6 +163,7 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
 
   <h3>AI clients</h3>
   <table>
+    ${row('Tools', this.aiTools ? escapeHtml(`${this.aiTools.enabled ? 'on' : 'off'}: ${this.aiTools.reason}`) : '—')}
     ${row('Copilot', escapeHtml(copilot))}
     ${row('Claude Code', escapeHtml(claude))}
   </table>

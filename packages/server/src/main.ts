@@ -5,7 +5,7 @@ import * as sea from 'node:sea';
 import { parseArgs } from 'node:util';
 import { isMainThread } from 'node:worker_threads';
 import { BROWSE_TABLES, IndexDb, Indexer, TreeSitter, type BrowseTable, type LanguageId } from '@refdex/core';
-import { serveMcp } from './mcp.ts';
+import { DEFAULT_MIN_TOKENS, serveMcp, type ToolsMode } from './mcp.ts';
 import { serve } from './serve.ts';
 import { wasmLoader } from './wasm.ts';
 import { runIndexWorker } from './worker.ts';
@@ -39,7 +39,11 @@ Options:
   --include <pattern>  only index files matching these gitignore-style patterns (repeatable)
   --language <id>      only index these languages: python, typescript, java, csharp (repeatable)
   --no-watch    serve: do not watch files for changes
-Environment: REFDEX_ROOT and REFDEX_DB stand in for --root and --db.`;
+  --tools auto|always|never  mcp: offer the tools always, never, or (auto, default) only for a codebase
+                             of at least --min-tokens; on a small one they cost more than they save
+  --min-tokens <n>           mcp: size threshold for --tools auto, in estimated tokens of source
+                             (default: ${DEFAULT_MIN_TOKENS})
+Environment: REFDEX_ROOT, REFDEX_DB, REFDEX_TOOLS and REFDEX_MIN_TOKENS stand in for the flags.`;
 
 async function main(argv: string[]): Promise<number> {
   const { values: opts, positionals } = parseArgs({
@@ -55,6 +59,8 @@ async function main(argv: string[]): Promise<number> {
       include: { type: 'string', multiple: true, default: [] },
       language: { type: 'string', multiple: true, default: [] },
       watch: { type: 'boolean', default: true },
+      tools: { type: 'string' },
+      'min-tokens': { type: 'string' },
     },
     allowNegative: true,
   });
@@ -78,9 +84,14 @@ async function main(argv: string[]): Promise<number> {
     case 'serve':
       await serve(root(), resolve(opts.db), { ...workspaceOptions(), watch: opts.watch });
       return -1; // keeps running until stdin closes
-    case 'mcp':
-      await serveMcp(root(), resolve(opts.db), VERSION);
+    case 'mcp': {
+      const tools = (opts.tools ?? process.env.REFDEX_TOOLS ?? 'auto') as ToolsMode;
+      if (!['auto', 'always', 'never'].includes(tools)) throw new Error(`--tools must be auto, always or never, not ${tools}`);
+      const minTokens = Number(opts['min-tokens'] ?? process.env.REFDEX_MIN_TOKENS ?? DEFAULT_MIN_TOKENS);
+      if (!Number.isFinite(minTokens) || minTokens < 0) throw new Error(`--min-tokens must be a number, not ${opts['min-tokens']}`);
+      await serveMcp(root(), resolve(opts.db), VERSION, { tools, minTokens });
       return -1; // keeps running until the client disconnects
+    }
     case 'selftest':
       return selftest();
     case 'index': {

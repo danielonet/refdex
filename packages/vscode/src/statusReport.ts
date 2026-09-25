@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ClientState } from './clients';
 import type { IndexStats } from './daemon';
+import type { AiToolsState } from './session';
 import type { ClientUsage } from './usage';
 import { count, formatBytes, LANGUAGE_NAMES, timeAgo } from './webviewUtil';
 
@@ -33,6 +34,7 @@ const EXPLAIN = {
   index: 'RefDex parses Python, TypeScript, Java and C# files into a local symbol index that AI assistants query instead of reading whole files.',
   copilot: 'RefDex is registered as an MCP server for GitHub Copilot agent mode. Copilot starts it when a chat needs its tools.',
   claude: 'Claude Code reads MCP servers from its settings. Connecting adds RefDex for this project only (private to you) or to the shared .mcp.json.',
+  aiTools: 'RefDex\'s tool definitions are sent with every AI request (about 1,200 tokens). On a small codebase, reading files is cheaper, so the tools are only offered once the indexed code reaches the refdex.aiToolsMinTokens setting (refdex.aiTools changes this).',
   folder: 'With several folders open, RefDex indexes one of them at a time and serves it to AI clients. Each folder keeps its own index.',
   calls: 'Tool calls AI clients made to RefDex, with the amount of text returned (about 4 characters per token).',
 } as const;
@@ -47,6 +49,7 @@ export interface ReportState {
   usage?: ClientUsage[];
   /** The indexed folder, and how many folders the window has open. */
   folder?: { name: string; path: string; count: number };
+  aiTools?: AiToolsState;
 }
 
 /**
@@ -172,6 +175,14 @@ export class StatusReport implements vscode.Disposable {
     md.appendMarkdown(row(`<strong>Uses linked</strong> ${info('uses')}`, grey(`of ${stats.edges.toLocaleString()} found`)));
     md.appendMarkdown(headline(stats.resolvedEdges.toLocaleString(), 'calls, base types and type references'));
     md.appendMarkdown('---\n\n');
+
+    // Whether AI clients get the tools at all (off on small codebases).
+    const { aiTools } = this.state;
+    if (aiTools) {
+      md.appendMarkdown(row(`<strong>AI tools</strong> ${info('aiTools')}`, grey(aiTools.enabled ? 'On' : 'Off')));
+      md.appendMarkdown(row(grey(escapeHtml(aiTools.reason)), ''));
+      md.appendMarkdown('---\n\n');
+    }
 
     this.appendClients(md);
 

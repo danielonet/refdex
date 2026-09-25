@@ -140,7 +140,7 @@ export class Indexer {
     // Parse outside the transaction, write in batches so readers are never blocked for long.
     const BATCH = 200;
     for (let i = 0; i < paths.length; i += BATCH) {
-      const batch: { path: string; hash: string; parsed: Awaited<ReturnType<TreeSitter['parseFile']>>; language: LanguageId }[] = [];
+      const batch: { path: string; hash: string; chars: number; parsed: Awaited<ReturnType<TreeSitter['parseFile']>>; language: LanguageId }[] = [];
       for (const path of paths.slice(i, i + BATCH)) {
         const language = languageForPath(path);
         if (!language) continue;
@@ -151,7 +151,7 @@ export class Indexer {
             result.unchanged++;
             continue;
           }
-          batch.push({ path, hash, language, parsed: await this.treeSitter.parseFile(path, language, source, ws) });
+          batch.push({ path, hash, chars: source.length, language, parsed: await this.treeSitter.parseFile(path, language, source, ws) });
         } catch (e) {
           result.failed.push({ path, error: e instanceof Error ? e.message : String(e) });
         }
@@ -159,7 +159,7 @@ export class Indexer {
       this.db.transaction(() => {
         result.retryEdgeIds.push(...this.db.edgesInto(batch.map((f) => f.path)));
         for (const f of batch) {
-          result.changedIds.push(this.db.replaceFile(f.path, f.hash, ws.projectRoot(f.path, f.language), f.parsed));
+          result.changedIds.push(this.db.replaceFile(f.path, f.hash, ws.projectRoot(f.path, f.language), f.parsed, f.chars));
           result.indexed++;
         }
       });

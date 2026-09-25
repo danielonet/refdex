@@ -41,7 +41,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // ---- the folder being indexed; commands act on whichever is current ----
   let session: FolderSession | undefined;
   const version = (context.extension.packageJSON as { version: string }).version;
-  const copilot = isInstalled(COPILOT_CHAT_ID) ? registerCopilotProvider(() => session?.mcpCommand(), version) : undefined;
+  const copilot = isInstalled(COPILOT_CHAT_ID) ? registerCopilotProvider(() => session?.copilotCommand(), version) : undefined;
   if (copilot) {
     context.subscriptions.push(copilot);
     log.info('Copilot Chat found: registered RefDex as an MCP server for agent mode');
@@ -118,6 +118,7 @@ export async function activate(context: vscode.ExtensionContext) {
       return session!.daemon;
     },
     clientState: () => session!.clientState(),
+    aiTools: () => session!.aiTools(),
     openFolder: (folder: vscode.WorkspaceFolder) => openFolder(folder),
   };
 }

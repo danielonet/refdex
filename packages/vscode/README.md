@@ -41,6 +41,8 @@ Smaller answers mean:
 - **More focused answers.** The context holds the code that matters, not everything near it.
 - **Fewer wrong guesses.** Signatures, callers and base classes come from the parsed code, not from skimming.
 
+**RefDex steps aside where it wouldn't pay off.** The tools have a fixed cost: their definitions, about 1,200 tokens, are sent with every request an assistant makes. On a small project, reading the files is cheaper. So RefDex offers its tools only once the indexed code reaches about 100,000 tokens (roughly 400 KB of source). Below that, Copilot doesn't start it and Claude Code sees no RefDex tools. The status bar shows which applies and why, and the `refdex.aiTools` settings change it.
+
 ## Built for large codebases
 
 RefDex is meant for the codebases where assistants struggle most: large monorepos, enterprise Java and C# solutions, and years-old Python and TypeScript projects.
@@ -123,6 +125,8 @@ method src/services/orderService:OrderService.constructor  src/services/orderSer
 | `refdex.exclude` | `[]` | Extra paths to leave out, such as `generated/` or `**/*.test.ts` |
 | `refdex.languages` | `[]` | Languages to index. Empty means all |
 | `refdex.watch` | `true` | Keep the index up to date as files change |
+| `refdex.aiTools` | `auto` | When AI clients get RefDex's tools: `auto` (once the codebase is large enough), `always` or `never` |
+| `refdex.aiToolsMinTokens` | `100000` | Size of the indexed code, in estimated tokens, from which `auto` offers the tools |
 
 ## Privacy
 

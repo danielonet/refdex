@@ -21,8 +21,9 @@ describe('refdex mcp over stdio', () => {
     client = new Client({ name: 'refdex-test', version: '0.0.0' });
     await client.connect(new StdioClientTransport({
       command: process.execPath,
-      args: ['--disable-warning=ExperimentalWarning', MAIN, 'mcp', '--root', root],
-      stderr: 'inherit',
+      // The fixture is far below the size threshold; these tests are about the tools themselves.
+      args: ['--disable-warning=ExperimentalWarning', MAIN, 'mcp', '--root', root, '--tools', 'always'],
+      stderr: 'ignore',
     }));
   });
   after(async () => {
@@ -55,10 +56,61 @@ describe('refdex mcp over stdio', () => {
     // The session start comes first, without a tool.
     assert.equal(lines[0].event, 'connect');
     assert.equal(lines[0].tool, undefined);
+    assert.equal(lines[0].tools, true);
   });
 
   it('rejects invalid arguments', async () => {
     const res = await client.callTool({ name: 'search_symbols', arguments: { query: '' } });
     assert.equal(res.isError, true);
+  });
+});
+
+describe('refdex mcp: tools only where they pay off', () => {
+  let root: string;
+  before(async () => {
+    root = await mkdtemp(join(tmpdir(), 'refdex-mcp-size-'));
+    await cp(FIXTURE, root, { recursive: true });
+    execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN, 'index', '--root', root]);
+  });
+  after(() => rm(root, { recursive: true, force: true }));
+
+  const connect = async (...flags: string[]) => {
+    const client = new Client({ name: 'refdex-test', version: '0.0.0' });
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: ['--disable-warning=ExperimentalWarning', MAIN, 'mcp', '--root', root, ...flags],
+      stderr: 'ignore',
+    }));
+    return client;
+  };
+
+  it('offers no tools for a small codebase, and says why', async () => {
+    const client = await connect();
+    try {
+      assert.deepEqual((await client.listTools()).tools, []);
+      assert.match(client.getInstructions() ?? '', /tools are off for this workspace \(small codebase: ~\d+ tokens of code \(threshold 100,000\)\); read files directly/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('offers them above the threshold, or when forced; never turns them off', async () => {
+    for (const [flags, count] of [[['--min-tokens', '10'], 5], [['--tools', 'always'], 5], [['--tools', 'never', '--min-tokens', '0'], 0]] as const) {
+      const client = await connect(...flags);
+      try {
+        assert.equal((await client.listTools()).tools.length, count, flags.join(' '));
+      } finally {
+        await client.close();
+      }
+    }
+  });
+
+  it('logs the decision on connect', async () => {
+    const client = await connect();
+    await client.close();
+    const lines = (await readFile(join(root, '.refdex', 'mcp-usage.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(lines.at(-1).event, 'connect');
+    assert.equal(lines.at(-1).tools, false);
+    assert.match(lines.at(-1).reason, /^small codebase/);
   });
 });

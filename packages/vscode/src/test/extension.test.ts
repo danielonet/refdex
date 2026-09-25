@@ -13,12 +13,13 @@ import { readUsage, UsageTail } from '../usage';
 suite('RefDex extension', () => {
   let daemon: Daemon;
   let clientState: () => Promise<ClientState>;
+  let aiTools: () => { enabled: boolean; reason: string };
   let extensionUri: vscode.Uri;
 
   suiteSetup(async () => {
-    const ext = vscode.extensions.getExtension<{ daemon: Daemon; clientState: () => Promise<ClientState> }>('danielonnet.refdex');
+    const ext = vscode.extensions.getExtension<{ daemon: Daemon; clientState: () => Promise<ClientState>; aiTools: typeof aiTools }>('danielonnet.refdex');
     assert.ok(ext, 'extension is installed in the test host');
-    ({ daemon, clientState } = await ext.activate());
+    ({ daemon, clientState, aiTools } = await ext.activate());
     extensionUri = ext.extensionUri;
   });
 
@@ -126,6 +127,33 @@ suite('RefDex extension', () => {
     assert.strictEqual(vscode.workspace.workspaceFile, undefined);
     assert.strictEqual(indexPathFor(storage, folder), join('/tmp/storage', 'index.db'));
     assert.strictEqual(daemon.root, folder.uri.fsPath);
+  });
+
+  test('offers AI tools only for a codebase worth it, unless the settings say otherwise', async () => {
+    await vscode.commands.executeCommand('refdex.generateIndex');
+    // The fixture is a few hundred tokens of code, far below the default threshold.
+    const small = aiTools();
+    assert.strictEqual(small.enabled, false);
+    assert.match(small.reason, /^small codebase: ~\d+ tokens of code \(threshold 100,000\)$/);
+
+    const cfg = vscode.workspace.getConfiguration('refdex');
+    try {
+      await cfg.update('aiTools', 'always', vscode.ConfigurationTarget.Workspace);
+      assert.strictEqual(aiTools().enabled, true);
+      await cfg.update('aiTools', 'auto', vscode.ConfigurationTarget.Workspace);
+      await cfg.update('aiToolsMinTokens', 10, vscode.ConfigurationTarget.Workspace);
+      assert.strictEqual(aiTools().enabled, true);
+    } finally {
+      await cfg.update('aiTools', undefined, vscode.ConfigurationTarget.Workspace);
+      await cfg.update('aiToolsMinTokens', undefined, vscode.ConfigurationTarget.Workspace);
+      // Workspace settings are written into the fixture; leave it as it was.
+      const dotVscode = join(vscode.workspace.workspaceFolders![0].uri.fsPath, '.vscode');
+      if (readFileSync(join(dotVscode, 'settings.json'), 'utf8').replace(/\s/g, '') === '{}') {
+        rmSync(dotVscode, { recursive: true, force: true });
+      }
+    }
+    const cmd = serverCommand(extensionUri, '/p', '/p/index.db', { mode: 'auto', minTokens: 5000 });
+    assert.deepStrictEqual(cmd.args.slice(-4), ['--tools', 'auto', '--min-tokens', '5000']);
   });
 
   test('finds SQLite viewer extensions by their custom editor pattern', () => {

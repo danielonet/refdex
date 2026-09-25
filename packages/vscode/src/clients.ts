@@ -27,10 +27,19 @@ export interface ServerCommand {
   env: Record<string, string>;
 }
 
-export function serverCommand(extensionUri: vscode.Uri, root: string, dbPath: string): ServerCommand {
+/** When the MCP server offers its tools (`refdex mcp --tools --min-tokens`); see `refdex.aiTools`. */
+export interface AiToolsSettings {
+  mode: 'auto' | 'always' | 'never';
+  minTokens: number;
+}
+
+export function serverCommand(extensionUri: vscode.Uri, root: string, dbPath: string, tools?: AiToolsSettings): ServerCommand {
   return {
     command: process.execPath,
-    args: [vscode.Uri.joinPath(extensionUri, 'dist', 'daemon', 'refdex.cjs').fsPath, 'mcp', '--root', root, '--db', dbPath],
+    args: [
+      vscode.Uri.joinPath(extensionUri, 'dist', 'daemon', 'refdex.cjs').fsPath, 'mcp', '--root', root, '--db', dbPath,
+      ...(tools ? ['--tools', tools.mode, '--min-tokens', String(tools.minTokens)] : []),
+    ],
     env: { ELECTRON_RUN_AS_NODE: '1' },
   };
 }

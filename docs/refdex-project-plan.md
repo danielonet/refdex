@@ -248,6 +248,16 @@ Phase 4 notes (2026-09-24):
   - Functions passed as values, decorators with arguments beyond the call itself, and Python `getattr`/dynamic dispatch aren't linked.
   - Constructor calls link to the class, not to a particular constructor overload.
 
+Tools only where they pay off (2026-09-25):
+
+- **Fixed cost:** the five tool definitions and the instructions are about 4,700 characters, roughly 1,200 tokens, sent with every client request. On a small codebase, reading files costs less.
+- **Gate:** `refdex mcp --tools auto|always|never --min-tokens N` (or `REFDEX_TOOLS`/`REFDEX_MIN_TOKENS`). In `auto`, the tools are offered when the indexed source reaches N estimated tokens (4 characters each, summed from the new `files.chars` column, schema 5). The default is 100,000.
+  - Below the threshold the server lists no tools and sends a one-line instruction instead of the full one.
+  - It re-checks every minute and enables the tools once the codebase is big enough. The client is told the tool list changed.
+  - All tools are registered before connecting and then disabled, since the SDK can't add the tools capability later.
+- **Extension:** it applies the same rule. Copilot's provider returns no server while the tools are off, so Copilot doesn't start RefDex at all, and Claude Code isn't offered a connection. The status report, About view and log show the decision and its reason. The `refdex.aiTools` and `refdex.aiToolsMinTokens` settings are passed to every MCP command.
+- **Open:** 100,000 is a heuristic. The Phase 5 token benchmark should set it from measurements.
+
 ### Phase 5: Hardening and VS Code release
 
 - [ ] Fixture repo per language covering its edge cases

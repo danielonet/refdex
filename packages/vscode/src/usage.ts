@@ -18,6 +18,9 @@ export interface UsageRecord {
   clientVersion?: string;
   /** `connect`: a client started a session; otherwise the line is a tool call. */
   event?: 'connect';
+  /** On `connect`: whether the server offers its tools, and why. */
+  tools?: boolean;
+  reason?: string;
   tool?: string;
   args?: Record<string, unknown>;
   ms?: number;

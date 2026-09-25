@@ -23,6 +23,8 @@ export interface IndexStats {
   resolvedImports: number;
   edges: number;
   resolvedEdges: number;
+  /** Characters of indexed source code; about 4 per token. */
+  codeChars: number;
   byLanguage: { language: string; files: number; symbols: number }[];
   indexedAt: string | null;
 }

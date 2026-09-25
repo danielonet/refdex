@@ -8,7 +8,7 @@ import type { EdgeType, ExtractedSymbol, ImportDecl, ImportedName, ParsedFile, S
 const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
 
 /** Bump when the schema changes. The index is a cache, so an old one is simply rebuilt. */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 // Few indexes on edges: every save rewrites a file's edges. edges_to is partial because most edges
 // start (and many stay) unresolved; lookups by target imply NOT NULL, so SQLite still uses it.
@@ -23,6 +23,8 @@ CREATE TABLE files (
   path TEXT NOT NULL UNIQUE,
   language TEXT NOT NULL,
   hash TEXT NOT NULL,
+  -- Characters of source; their sum estimates how many tokens reading the codebase would take.
+  chars INTEGER NOT NULL DEFAULT 0,
   project TEXT NOT NULL,
   indexed_at TEXT NOT NULL
 );
@@ -182,6 +184,8 @@ export interface IndexStats {
   resolvedImports: number;
   edges: number;
   resolvedEdges: number;
+  /** Characters of indexed source code; about 4 per token. */
+  codeChars: number;
   byLanguage: { language: string; files: number; symbols: number }[];
   indexedAt: string | null;
 }
@@ -283,20 +287,20 @@ export class IndexDb {
    * Replaces a file's symbols, imports and edges. Call inside `transaction`. Returns the file id,
    * which stays the same for a file that was indexed before, so imports of it stay resolved.
    */
-  replaceFile(path: string, hash: string, project: string, parsed: ParsedFile): number {
+  replaceFile(path: string, hash: string, project: string, parsed: ParsedFile, chars = 0): number {
     const now = new Date().toISOString();
     const existing = this.stmt('SELECT id FROM files WHERE path = ?').get(path) as { id: number } | undefined;
     let fileId: number;
     if (existing) {
       fileId = existing.id;
-      this.stmt('UPDATE files SET language = ?, hash = ?, project = ?, indexed_at = ? WHERE id = ?').run(parsed.language, hash, project, now, fileId);
+      this.stmt('UPDATE files SET language = ?, hash = ?, chars = ?, project = ?, indexed_at = ? WHERE id = ?').run(parsed.language, hash, chars, project, now, fileId);
       // Own edges first, so deleting the symbols doesn't update them one by one.
       this.stmt('DELETE FROM edges WHERE file_id = ?').run(fileId);
       this.stmt('DELETE FROM imports WHERE file_id = ?').run(fileId);
       this.stmt('DELETE FROM symbols WHERE file_id = ?').run(fileId);
     } else {
-      const { lastInsertRowid } = this.stmt('INSERT INTO files (path, language, hash, project, indexed_at) VALUES (?, ?, ?, ?, ?)')
-        .run(path, parsed.language, hash, project, now);
+      const { lastInsertRowid } = this.stmt('INSERT INTO files (path, language, hash, chars, project, indexed_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(path, parsed.language, hash, chars, project, now);
       fileId = Number(lastInsertRowid);
     }
     const insertSymbol = this.stmt(
@@ -725,9 +729,10 @@ export class IndexDb {
     const row = this.stmt(
       `SELECT max(indexed_at) AS indexedAt, (SELECT count(*) FROM imports) AS imports,
          (SELECT count(*) FROM imports WHERE resolved_file_id IS NOT NULL OR resolved_namespace IS NOT NULL) AS resolvedImports,
-         (SELECT count(*) FROM edges) AS edges, (SELECT count(*) FROM edges WHERE to_symbol_id IS NOT NULL) AS resolvedEdges
+         (SELECT count(*) FROM edges) AS edges, (SELECT count(*) FROM edges WHERE to_symbol_id IS NOT NULL) AS resolvedEdges,
+         coalesce(sum(chars), 0) AS codeChars
        FROM files`,
-    ).get() as { indexedAt: string | null; imports: number; resolvedImports: number; edges: number; resolvedEdges: number };
+    ).get() as { indexedAt: string | null; imports: number; resolvedImports: number; edges: number; resolvedEdges: number; codeChars: number };
     return { ...this.counts(), ...row, byLanguage };
   }
 
@@ -852,7 +857,7 @@ const BROWSE: Record<BrowseTable, { table: string; from: string; description: st
     table: 'files',
     from: 'files f',
     description: 'One row per indexed file; the hash drives incremental updates',
-    columns: [['id', 'f.id'], ['path', 'f.path'], ['language', 'f.language'], ['project', 'f.project'], ['hash', 'f.hash'], ['indexed_at', 'f.indexed_at']],
+    columns: [['id', 'f.id'], ['path', 'f.path'], ['language', 'f.language'], ['project', 'f.project'], ['chars', 'f.chars'], ['hash', 'f.hash'], ['indexed_at', 'f.indexed_at']],
   },
   symbols: {
     table: 'symbols',
