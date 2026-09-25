@@ -87,8 +87,13 @@ async function main(argv: string[]): Promise<number> {
     case 'mcp': {
       const tools = (opts.tools ?? process.env.REFDEX_TOOLS ?? 'auto') as ToolsMode;
       if (!['auto', 'always', 'never'].includes(tools)) throw new Error(`--tools must be auto, always or never, not ${tools}`);
-      const minTokens = Number(opts['min-tokens'] ?? process.env.REFDEX_MIN_TOKENS ?? DEFAULT_MIN_TOKENS);
-      if (!Number.isFinite(minTokens) || minTokens < 0) throw new Error(`--min-tokens must be a number, not ${opts['min-tokens']}`);
+      // An empty value is not 0 (Number('') is): it would turn the tools on for every codebase.
+      const rawMinTokens = opts['min-tokens'] ?? process.env.REFDEX_MIN_TOKENS ?? String(DEFAULT_MIN_TOKENS);
+      const minTokens = rawMinTokens.trim() === '' ? NaN : Number(rawMinTokens);
+      if (!Number.isFinite(minTokens) || minTokens < 0) {
+        const source = opts['min-tokens'] !== undefined ? '--min-tokens' : 'REFDEX_MIN_TOKENS';
+        throw new Error(`${source} must be a non-negative number, not "${rawMinTokens}"`);
+      }
       await serveMcp(root(), resolve(opts.db), VERSION, { tools, minTokens });
       return -1; // keeps running until the client disconnects
     }

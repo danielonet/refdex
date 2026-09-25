@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 const MAIN = join(import.meta.dirname, '..', 'src', 'main.ts');
 const FIXTURE = join(import.meta.dirname, '..', '..', 'core', 'test', 'fixtures', 'java');
@@ -88,7 +88,7 @@ describe('refdex mcp: tools only where they pay off', () => {
     const client = await connect();
     try {
       assert.deepEqual((await client.listTools()).tools, []);
-      assert.match(client.getInstructions() ?? '', /tools are off for this workspace \(small codebase: ~\d+ tokens of code \(threshold 100,000\)\); read files directly/);
+      assert.match(client.getInstructions() ?? '', /tools are off for this workspace \(small codebase: ~\d+ tokens of code \(threshold 100,000\)\); read files directly\. If they appear later/);
     } finally {
       await client.close();
     }
@@ -103,6 +103,19 @@ describe('refdex mcp: tools only where they pay off', () => {
         await client.close();
       }
     }
+  });
+
+  it('rejects an empty or invalid threshold instead of reading it as 0', () => {
+    const run = (env: Record<string, string>, ...flags: string[]) =>
+      spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN, 'mcp', '--root', root, ...flags], {
+        env: { ...process.env, ...env }, input: '', encoding: 'utf8',
+      });
+    const empty = run({ REFDEX_MIN_TOKENS: '' });
+    assert.equal(empty.status, 1);
+    assert.match(empty.stderr, /REFDEX_MIN_TOKENS must be a non-negative number, not ""/);
+    const bad = run({}, '--min-tokens', 'lots');
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /--min-tokens must be a non-negative number, not "lots"/);
   });
 
   it('logs the decision on connect', async () => {

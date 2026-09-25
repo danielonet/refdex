@@ -71,10 +71,12 @@ export function toolsDecision(dbPath: string, opts: McpOptions): ToolsDecision {
 export async function serveMcp(root: string, dbPath: string, version: string, opts: McpOptions = { tools: 'auto', minTokens: DEFAULT_MIN_TOKENS }): Promise<void> {
   const tools = new RefdexTools(root, dbPath);
   let decision = toolsDecision(dbPath, opts);
-  // Without tools, only a one-line note: the full instructions would be overhead too.
+  // Without tools, only a short note: the full instructions would be overhead too. Clients get
+  // instructions once, at initialize, so in `auto` the note also covers the tools arriving later.
   const instructions = decision.enabled
     ? INSTRUCTIONS
-    : `RefDex's code index tools are off for this workspace (${decision.reason}); read files directly.`;
+    : `RefDex's code index tools are off for this workspace (${decision.reason}); read files directly.` +
+      (opts.tools === 'auto' ? ' If they appear later, use them to find and read code instead of opening whole files.' : '');
   const server = new McpServer({ name: 'refdex', title: 'RefDex code index', version }, { instructions });
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   const usage = new UsageLog(dbPath);

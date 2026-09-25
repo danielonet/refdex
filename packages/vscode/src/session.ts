@@ -12,6 +12,9 @@ import { DatabaseBrowser } from './databaseBrowser';
 import type { StatusReport } from './statusReport';
 import { clientName, readUsage, usageLogPath, UsageTail, type UsageRecord } from './usage';
 
+/** The settings the daemon runs with; changing one of them restarts it. */
+export const DAEMON_SETTINGS = ['exclude', 'include', 'languages', 'watch'] as const;
+
 export function daemonOptions(): DaemonOptions {
   const cfg = vscode.workspace.getConfiguration('refdex');
   return {
@@ -280,10 +283,15 @@ export class FolderSession implements vscode.Disposable {
       }));
   }
 
-  /** Settings changed: restart the daemon with them, and point AI clients at the new tool settings. */
-  restart(): void {
-    this.ctx.log.info('settings changed; restarting the daemon');
-    this.daemon.restart(daemonOptions());
+  /**
+   * Settings changed: restart the daemon if its own settings changed (the AI tools settings
+   * don't reach it), and point AI clients at the new tool settings.
+   */
+  settingsChanged(daemonSettings: boolean): void {
+    if (daemonSettings) {
+      this.ctx.log.info('settings changed; restarting the daemon');
+      this.daemon.restart(daemonOptions());
+    }
     void this.showStats();
     this.ctx.copilot?.refresh();
     void this.claude.refreshIfStale(this.mcpCommand());

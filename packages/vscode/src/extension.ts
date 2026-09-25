@@ -5,7 +5,7 @@ import { COPILOT_CHAT_ID, isInstalled, registerCopilotProvider } from './clients
 import { DatabaseBrowser } from './databaseBrowser';
 import type { Daemon } from './daemon';
 import { exportCsv, openDatabase } from './openDatabase';
-import { FolderSession, indexPathFor } from './session';
+import { DAEMON_SETTINGS, FolderSession, indexPathFor } from './session';
 import { StatusReport } from './statusReport';
 
 /** workspaceState key of the folder the user picked, as a URI string. */
@@ -97,7 +97,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('refdex')) {
-        session?.restart();
+        session?.settingsChanged(DAEMON_SETTINGS.some((k) => e.affectsConfiguration(`refdex.${k}`)));
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
