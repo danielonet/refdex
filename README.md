@@ -1,15 +1,22 @@
-# refdex
+# RefDex
 
-VS Code extension that indexes the code base so that prompts to the LLM consume fewer tokens.
-See [docs/refdex-project-plan.md](docs/refdex-project-plan.md) for the plan.
+**A code index for AI assistants. Claude Code and GitHub Copilot can look code up instead of reading whole files, so each task uses fewer tokens and they find their way around a large codebase.**
+
+RefDex parses TypeScript, Python, Java and C# into a local SQLite index of every class, method, function and property: signatures, doc comments, resolved imports and a call graph. An MCP server lets AI assistants query it. Instead of reading a 900-line file to find one method, the assistant asks for the file's outline, or for just that method, or for everything that calls it.
+
+- **Prompt optimization:** the context window holds the code the task needs, not whole files around it. For example, RefDex's own 915-line database module costs about 11,000 tokens to read whole, about 2,600 as an outline, and about 280 for one method.
+- **Large codebases:** incremental, hash-based updates (a saved file in 40–60 ms on a generated 3,000-file project), background indexing, monorepo and namespace-aware import resolution, and a PageRank repo map that shows an assistant the core of an unfamiliar codebase first.
+- **No setup:** inside VS Code, RefDex registers with Copilot automatically and connects to Claude Code with one command. The index stays on your machine.
+
+The Marketplace page, with features, tools, commands and settings, is [packages/vscode/README.md](packages/vscode/README.md). The design and roadmap are in [docs/refdex-project-plan.md](docs/refdex-project-plan.md).
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
 | `packages/core` | Language adapters, workspace scan, SQLite index and incremental indexer |
-| `packages/server` | The `refdex` CLI and daemon (`refdex serve`: worker-thread indexing, file watcher, (later) MCP); builds to a single executable |
-| `packages/vscode` | VS Code extension (scaffolded with `yo code`) |
+| `packages/server` | The `refdex` CLI, the daemon (`refdex serve`: worker-thread indexing, file watcher) and the MCP server (`refdex mcp`); builds to a single executable |
+| `packages/vscode` | VS Code extension: daemon lifecycle, Copilot and Claude Code setup, status bar report, database browser. Its `README.md` is the Marketplace page |
 | `plugins/intellij` | IntelliJ plugin (Phase 6) |
 
 ## Development
