@@ -33,6 +33,11 @@ export class DatabaseBrowser {
     DatabaseBrowser.current = new DatabaseBrowser(panel, daemon, exportCsv);
   }
 
+  /** Closes the browser, e.g. when another workspace folder's index is selected. */
+  static close(): void {
+    DatabaseBrowser.current?.panel.dispose();
+  }
+
   /** Called after re-indexing so an open browser shows fresh counts and rows. */
   static refresh(): void {
     void DatabaseBrowser.current?.panel.webview.postMessage({ type: 'refresh' });

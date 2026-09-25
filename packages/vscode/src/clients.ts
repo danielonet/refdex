@@ -37,15 +37,16 @@ export function serverCommand(extensionUri: vscode.Uri, root: string, dbPath: st
 
 /**
  * Registers RefDex as an MCP server for VS Code's agent mode (GitHub Copilot). Detection only
- * decides whether to offer this; the server itself behaves the same for every client.
+ * decides whether to offer this; the server itself behaves the same for every client. `cmd` serves
+ * the folder being indexed; call `refresh` when that changes.
  */
-export function registerCopilotProvider(cmd: () => ServerCommand, version: string): vscode.Disposable & { refresh(): void } {
+export function registerCopilotProvider(cmd: () => ServerCommand | undefined, version: string): vscode.Disposable & { refresh(): void } {
   const changed = new vscode.EventEmitter<void>();
   const registration = vscode.lm.registerMcpServerDefinitionProvider('refdex.mcp', {
     onDidChangeMcpServerDefinitions: changed.event,
     provideMcpServerDefinitions: () => {
       const c = cmd();
-      return [new vscode.McpStdioServerDefinition('RefDex', c.command, c.args, c.env, version)];
+      return c ? [new vscode.McpStdioServerDefinition('RefDex', c.command, c.args, c.env, version)] : [];
     },
   });
   return {

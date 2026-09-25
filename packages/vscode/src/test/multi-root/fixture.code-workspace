@@ -1,0 +1,6 @@
+{
+  "folders": [
+    { "path": "../../../../core/test/fixtures/typescript" },
+    { "path": "../../../../core/test/fixtures/python" }
+  ]
+}

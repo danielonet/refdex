@@ -4,7 +4,7 @@
   "description": "Method-level code index for AI assistants (Claude Code, Copilot) via MCP",
   "publisher": "danielonnet",
   "icon": "media/icon.png",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "engines": {
     "vscode": "^1.101.0"
   },
@@ -12,6 +12,38 @@
     "Programming Languages",
     "AI",
     "Other"
+  ],
+  "keywords": [
+    "mcp",
+    "mcp server",
+    "model context protocol",
+    "claude",
+    "claude code",
+    "copilot",
+    "github copilot",
+    "copilot agent",
+    "ai",
+    "llm",
+    "agent",
+    "codebase context",
+    "token usage",
+    "token savings",
+    "save tokens",
+    "token management",
+    "code index",
+    "code search",
+    "symbol search",
+    "find references",
+    "call graph",
+    "repo map",
+    "outline",
+    "refactoring",
+    "tree-sitter",
+    "typescript",
+    "python",
+    "java",
+    "csharp",
+    "c#"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -29,6 +61,12 @@
         "command": "refdex.updateIndex",
         "title": "Update Index (changed files only)",
         "category": "RefDex"
+      },
+      {
+        "command": "refdex.selectFolder",
+        "title": "Select Workspace Folder\u2026",
+        "category": "RefDex",
+        "icon": "$(root-folder)"
       },
       {
         "command": "refdex.searchSymbols",
@@ -121,6 +159,10 @@
         {
           "command": "refdex.exportCsv",
           "when": "refdex.indexed"
+        },
+        {
+          "command": "refdex.selectFolder",
+          "when": "workspaceFolderCount > 1"
         }
       ]
     },

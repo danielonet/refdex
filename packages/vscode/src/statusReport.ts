@@ -15,6 +15,7 @@ const HOVER_OPEN_DB = 'refdex.hover.openDatabase';
 const HOVER_SETTINGS = 'refdex.hover.openSettings';
 const HOVER_TOGGLE_WATCH = 'refdex.hover.toggleWatch';
 const HOVER_CONNECT_CLAUDE = 'refdex.hover.connectClaudeCode';
+const HOVER_SELECT_FOLDER = 'refdex.hover.selectFolder';
 /** The ⓘ icons: hovering shows the explanation as a tooltip, clicking shows it as a message. */
 const HOVER_EXPLAIN = 'refdex.hover.explain';
 /** Clicking the status bar item opens its report instead of doing anything by itself. */
@@ -32,6 +33,7 @@ const EXPLAIN = {
   index: 'RefDex parses Python, TypeScript, Java and C# files into a local symbol index that AI assistants query instead of reading whole files.',
   copilot: 'RefDex is registered as an MCP server for GitHub Copilot agent mode. Copilot starts it when a chat needs its tools.',
   claude: 'Claude Code reads MCP servers from its settings. Connecting adds RefDex for this project only (private to you) or to the shared .mcp.json.',
+  folder: 'With several folders open, RefDex indexes one of them at a time and serves it to AI clients. Each folder keeps its own index.',
   calls: 'Tool calls AI clients made to RefDex, with the amount of text returned (about 4 characters per token).',
 } as const;
 type Topic = keyof typeof EXPLAIN;
@@ -43,12 +45,14 @@ export interface ReportState {
   dbBytes: number | undefined;
   clients?: ClientState;
   usage?: ClientUsage[];
+  /** The indexed folder, and how many folders the window has open. */
+  folder?: { name: string; path: string; count: number };
 }
 
 /**
  * The RefDex item in the status bar (right side, next to Copilot). Its tooltip is the index
  * report, styled after Copilot's status popup: sections fenced by rules, a bold title with grey
- * details on the right, big numbers, thin bars, ⓘ explanations and links as actions.
+ * details on the right, big numbers, ⓘ explanations and links as actions.
  *
  * It is a Markdown hover, so layout is limited to what VS Code's hover sanitizer lets through:
  * tables (`width`, `align`), spans coloured with `--vscode-*` theme variables, headings and rules.
@@ -78,6 +82,7 @@ export class StatusReport implements vscode.Disposable {
       vscode.commands.registerCommand(HOVER_SETTINGS, () => this.runFromHover('workbench.action.openSettings', '@ext:danielonnet.refdex')),
       vscode.commands.registerCommand(HOVER_TOGGLE_WATCH, () => this.runFromHover('refdex.toggleWatch')),
       vscode.commands.registerCommand(HOVER_CONNECT_CLAUDE, () => this.runFromHover('refdex.connectClaudeCode')),
+      vscode.commands.registerCommand(HOVER_SELECT_FOLDER, () => this.runFromHover('refdex.selectFolder')),
       vscode.commands.registerCommand(HOVER_EXPLAIN, (topic: Topic) => vscode.window.showInformationMessage(`RefDex: ${EXPLAIN[topic] ?? ''}`)),
     );
   }
@@ -114,7 +119,7 @@ export class StatusReport implements vscode.Disposable {
     const md = new vscode.MarkdownString(undefined, true);
     md.supportHtml = true;
     // Links are what a hover has instead of buttons; only RefDex's own commands are trusted.
-    md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_SEARCH, HOVER_OPEN_DB, HOVER_SETTINGS, HOVER_TOGGLE_WATCH, HOVER_CONNECT_CLAUDE, HOVER_EXPLAIN] };
+    md.isTrusted = { enabledCommands: [HOVER_GENERATE, HOVER_SEARCH, HOVER_OPEN_DB, HOVER_SETTINGS, HOVER_TOGGLE_WATCH, HOVER_CONNECT_CLAUDE, HOVER_SELECT_FOLDER, HOVER_EXPLAIN] };
     return md;
   }
 
@@ -129,6 +134,13 @@ export class StatusReport implements vscode.Disposable {
       : iconLink('settings-gear', HOVER_SETTINGS, 'RefDex settings');
     md.appendMarkdown(row('<strong>RefDex</strong>', buttons));
     md.appendMarkdown('---\n\n');
+
+    const { folder } = this.state;
+    if (folder && folder.count > 1) {
+      md.appendMarkdown(row(`<strong>Workspace folder</strong> ${info('folder')}`, `<span title="${escapeHtml(folder.path)}">${grey(escapeHtml(folder.name))}</span>`));
+      md.appendMarkdown(link(`Switch? ${grey(`(${folder.count} open)`)}`, HOVER_SELECT_FOLDER));
+      md.appendMarkdown('---\n\n');
+    }
 
     if (this.error) {
       md.appendMarkdown(row(`${colored('$(error)', 'charts-red')} <strong>Last run failed</strong>`, grey('See Output › RefDex')));
@@ -150,11 +162,10 @@ export class StatusReport implements vscode.Disposable {
     }
     md.appendMarkdown('---\n\n');
 
-    // Imports: share resolved to workspace code, as a percentage and a bar.
+    // Imports: share resolved to workspace code.
     const share = stats.imports ? stats.resolvedImports / stats.imports : 0;
     md.appendMarkdown(row(`<strong>Imports resolved</strong> ${info('imports')}`, grey(`${stats.resolvedImports.toLocaleString()} of ${stats.imports.toLocaleString()}`)));
     md.appendMarkdown(headline(`${Math.round(share * 100)}%`, 'to workspace code'));
-    md.appendMarkdown(bar(share));
     md.appendMarkdown('---\n\n');
 
     // Uses: a count, not a share; most unlinked uses are library calls.
@@ -282,12 +293,6 @@ function iconLink(icon: string, command: string, title: string): string {
 
 function info(topic: Topic): string {
   return `<a href="${commandUri(HOVER_EXPLAIN, [topic])}" title="${escapeHtml(EXPLAIN[topic])}">$(info)</a>`;
-}
-
-/** A thin progress bar, like Copilot's quota bars. */
-function bar(fraction: number, width = 52): string {
-  const filled = Math.round(Math.max(0, Math.min(1, fraction)) * width);
-  return row(colored('━'.repeat(filled), 'charts-blue') + colored('━'.repeat(width - filled), 'charts-lines'), '');
 }
 
 function escapeHtml(text: string): string {

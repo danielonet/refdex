@@ -50,7 +50,11 @@ describe('refdex mcp over stdio', () => {
     assert.ok(lines.length >= 2);
     assert.equal(lines.at(-1).client, 'refdex-test');
     assert.equal(lines.at(-1).tool, 'get_file_outline');
+    assert.deepEqual(lines.at(-1).args, { path: 'pom.xml' });
     assert.ok(lines.at(-1).chars > 0);
+    // The session start comes first, without a tool.
+    assert.equal(lines[0].event, 'connect');
+    assert.equal(lines[0].tool, undefined);
   });
 
   it('rejects invalid arguments', async () => {

@@ -82,7 +82,7 @@ export type DaemonEvent =
 export class Daemon implements vscode.Disposable {
   private child?: ChildProcessWithoutNullStreams;
   private nextId = 1;
-  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private readonly pending = new Map<number, { method: string; started: number; resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private readonly events = new vscode.EventEmitter<DaemonEvent>();
   readonly onEvent = this.events.event;
   private readonly script: string;
@@ -93,7 +93,7 @@ export class Daemon implements vscode.Disposable {
     readonly root: string,
     readonly dbPath: string,
     options: DaemonOptions,
-    private readonly log: vscode.OutputChannel,
+    private readonly log: vscode.LogOutputChannel,
   ) {
     this.script = vscode.Uri.joinPath(extensionUri, 'dist', 'daemon', 'refdex.cjs').fsPath;
     this.options = options;
@@ -183,8 +183,9 @@ export class Daemon implements vscode.Disposable {
   private request<T>(method: string, params?: object): Promise<T> {
     this.start();
     const id = this.nextId++;
+    this.log.info(`→ daemon ${method}${params ? ` ${describeParams(params)}` : ''}`);
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.pending.set(id, { method, started: Date.now(), resolve: resolve as (v: unknown) => void, reject });
       this.child!.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
     });
   }
@@ -200,16 +201,28 @@ export class Daemon implements vscode.Disposable {
     if (msg.id !== undefined) {
       const p = this.pending.get(msg.id);
       this.pending.delete(msg.id);
+      const took = p ? `${Date.now() - p.started} ms` : '';
       if (msg.error) {
+        this.log.error(`← daemon ${p?.method ?? msg.id} failed after ${took}: ${msg.error}`);
         p?.reject(new Error(msg.error));
       } else {
+        this.log.info(`← daemon ${p?.method ?? msg.id} ${took}${describeResult(msg.result)}`);
         p?.resolve(msg.result);
       }
     } else if (msg.event) {
-      if (msg.event === 'error') {
-        this.log.appendLine(`error: ${msg.message}`);
+      const e = msg as DaemonEvent;
+      if (e.event === 'error') {
+        this.log.error(`daemon: ${e.message}`);
+      } else if (e.event === 'indexing') {
+        this.log.info(`daemon: indexing ${e.rebuild ? 'from scratch' : e.full ? 'the workspace' : `${e.paths} changed path${e.paths === 1 ? '' : 's'}`}`);
+      } else {
+        const s = e.summary;
+        this.log.info(
+          `daemon: indexed ${s.indexed} file${s.indexed === 1 ? '' : 's'} (${s.unchanged} unchanged, ${s.removed} removed, ${s.failed.length} failed) ` +
+            `in ${s.ms} ms; ${e.stats.files} files, ${e.stats.symbols} symbols, ${e.stats.resolvedEdges} linked uses`,
+        );
       }
-      this.events.fire(msg as DaemonEvent);
+      this.events.fire(e);
     }
   }
 
@@ -228,4 +241,36 @@ export class Daemon implements vscode.Disposable {
     this.stop();
     this.events.dispose();
   }
+}
+
+/** Request parameters for the log, long values clipped. */
+function describeParams(params: object): string {
+  return Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${k}=${clip(JSON.stringify(v))}`)
+    .join(' ');
+}
+
+/** A short summary of a daemon answer, e.g. " · 20 results" or " · 100 of 3,512 rows". */
+function describeResult(result: unknown): string {
+  if (Array.isArray(result)) {
+    return ` · ${result.length} result${result.length === 1 ? '' : 's'}`;
+  }
+  if (result && typeof result === 'object') {
+    const r = result as Record<string, unknown>;
+    if (Array.isArray(r.rows) && typeof r.total === 'number') {
+      return ` · ${r.rows.length} of ${r.total.toLocaleString()} rows`;
+    }
+    if (typeof r.rows === 'number') {
+      return ` · ${r.rows.toLocaleString()} rows`;
+    }
+    if (typeof r.files === 'number' && typeof r.symbols === 'number') {
+      return ` · ${r.files.toLocaleString()} files, ${r.symbols.toLocaleString()} symbols`;
+    }
+  }
+  return '';
+}
+
+function clip(text: string, max = 120): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }

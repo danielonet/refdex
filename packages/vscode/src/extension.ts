@@ -1,248 +1,158 @@
-import { watch } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync } from 'node:fs';
 import * as vscode from 'vscode';
 import { AboutViewProvider } from './aboutView';
-import {
-  CLAUDE_CODE_ID, ClaudeCodeSetup, COPILOT_CHAT_ID, isInstalled, registerCopilotProvider, serverCommand,
-  type ClaudeScope, type ClientState,
-} from './clients';
-import { Daemon, type DaemonOptions, type IndexStats } from './daemon';
+import { COPILOT_CHAT_ID, isInstalled, registerCopilotProvider } from './clients';
 import { DatabaseBrowser } from './databaseBrowser';
+import type { Daemon } from './daemon';
 import { exportCsv, openDatabase } from './openDatabase';
+import { FolderSession, indexPathFor } from './session';
 import { StatusReport } from './statusReport';
-import { readUsage } from './usage';
 
-function options(): DaemonOptions {
-  const cfg = vscode.workspace.getConfiguration('refdex');
-  return {
-    exclude: cfg.get<string[]>('exclude', []),
-    include: cfg.get<string[]>('include', []),
-    languages: cfg.get<string[]>('languages', []),
-    watch: cfg.get<boolean>('watch', true),
-  };
+/** workspaceState key of the folder the user picked, as a URI string. */
+const FOLDER_KEY = 'refdex.folder';
+
+/** Folders RefDex can index: those on disk (not virtual file systems). */
+function localFolders(): readonly vscode.WorkspaceFolder[] {
+  return (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file');
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-  const log = vscode.window.createOutputChannel('RefDex');
+  // A log channel: timestamps and levels, and every daemon request and MCP call (see session.ts).
+  const log = vscode.window.createOutputChannel('RefDex', { log: true });
   const status = new StatusReport();
   context.subscriptions.push(log, status, vscode.commands.registerCommand('refdex.showLog', () => log.show()));
 
   // The index lives in the extension's per-workspace storage, not in the user's repo.
   const storage = context.storageUri;
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!storage || !root) {
+  const about = new AboutViewProvider(context, undefined);
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(AboutViewProvider.viewType, about));
+  if (!storage || !localFolders().length) {
     status.noFolder();
-    const about = new AboutViewProvider(context, undefined);
     const needFolder = () => vscode.window.showWarningMessage('RefDex: open a folder to index it.');
     context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider(AboutViewProvider.viewType, about),
-      ...['refdex.generateIndex', 'refdex.updateIndex', 'refdex.searchSymbols', 'refdex.openDatabase', 'refdex.browseDatabase', 'refdex.exportCsv', 'refdex.connectClaudeCode']
+      ...['refdex.generateIndex', 'refdex.updateIndex', 'refdex.searchSymbols', 'refdex.openDatabase', 'refdex.browseDatabase',
+        'refdex.exportCsv', 'refdex.connectClaudeCode', 'refdex.selectFolder', 'refdex.toggleWatch']
         .map((id) => vscode.commands.registerCommand(id, needFolder)),
     );
     return;
   }
   await vscode.workspace.fs.createDirectory(storage);
-  const dbPath = vscode.Uri.joinPath(storage, 'index.db').fsPath;
-  const daemon = new Daemon(context.extensionUri, root, dbPath, options(), log);
-  const about = new AboutViewProvider(context, daemon);
-  context.subscriptions.push(daemon, vscode.window.registerWebviewViewProvider(AboutViewProvider.viewType, about));
 
-  // ---- AI clients: RefDex's MCP server for Copilot (agent mode) and Claude Code ----
+  // ---- the folder being indexed; commands act on whichever is current ----
+  let session: FolderSession | undefined;
   const version = (context.extension.packageJSON as { version: string }).version;
-  const mcpCommand = () => serverCommand(context.extensionUri, root, dbPath);
-  const copilot = isInstalled(COPILOT_CHAT_ID) ? registerCopilotProvider(mcpCommand, version) : undefined;
+  const copilot = isInstalled(COPILOT_CHAT_ID) ? registerCopilotProvider(() => session?.mcpCommand(), version) : undefined;
   if (copilot) {
     context.subscriptions.push(copilot);
-    log.appendLine('Copilot Chat found: registered RefDex as an MCP server for agent mode');
+    log.info('Copilot Chat found: registered RefDex as an MCP server for agent mode');
   }
-  const claude = new ClaudeCodeSetup(root, log);
-  const clientState = async (): Promise<ClientState> => ({
-    copilot: { installed: !!copilot || isInstalled(COPILOT_CHAT_ID), registered: !!copilot },
-    claude: { installed: isInstalled(CLAUDE_CODE_ID), scope: (await claude.current())?.scope, cliFound: !!claude.cli() },
-  });
-  const refreshClients = async () => {
-    const [clients, usage] = await Promise.all([clientState(), readUsage(dbPath)]);
-    about.clients = clients;
-    status.update({ clients, usage });
-    void about.refresh();
-  };
-  // Tool calls are logged by the MCP server next to the index; show them as they happen.
-  let usageTimer: NodeJS.Timeout | undefined;
-  try {
-    const usageWatcher = watch(dirname(dbPath), (_event, name) => {
-      if (name?.toString().startsWith('mcp-usage')) {
-        clearTimeout(usageTimer);
-        usageTimer = setTimeout(() => void refreshClients(), 1000);
-      }
-    });
-    context.subscriptions.push({ dispose: () => usageWatcher.close() });
-  } catch (e) {
-    log.appendLine(`cannot watch MCP usage: ${e}`);
-  }
+  const sessionContext = { context, log, status, about, copilot, storage };
 
-  let stats: IndexStats | undefined;
-  const showStats = async (fresh?: IndexStats) => {
-    stats = fresh ?? (await daemon.stats().catch(() => undefined));
-    const info = await daemon.info().catch(() => undefined);
-    status.update({ stats, watching: info?.watching ?? false, watchSetting: options().watch, dbBytes: info?.dbBytes });
-    void about.refresh(stats);
-    void vscode.commands.executeCommand('setContext', 'refdex.indexed', !!stats?.files);
+  // Folder switches run one at a time, in order.
+  let switching: Promise<void> = Promise.resolve();
+  const openFolder = (folder: vscode.WorkspaceFolder | undefined) =>
+    (switching = switching.then(async () => {
+      if (session && folder && session.root === folder.uri.fsPath) {
+        return;
+      }
+      session?.dispose();
+      session = undefined;
+      DatabaseBrowser.close();
+      if (!folder) {
+        about.setDaemon(undefined);
+        status.noFolder();
+        return;
+      }
+      await context.workspaceState.update(FOLDER_KEY, folder.uri.toString());
+      session = await FolderSession.open(sessionContext, folder);
+    }).catch((e) => log.error(`could not open ${folder?.uri.fsPath}: ${e}`)));
+
+  const withSession = (fn: (s: FolderSession) => unknown) => () => {
+    if (session) {
+      return fn(session);
+    }
+    return vscode.window.showWarningMessage('RefDex: open a folder to index it.');
   };
 
-  // The daemon re-indexes changed files on its own; keep the status bar, About view and browser in step.
-  context.subscriptions.push(
-    daemon.onEvent((e) => {
-      if (e.event === 'indexing') {
-        status.indexing();
-      } else if (e.event === 'indexed') {
-        void showStats(e.stats);
-        DatabaseBrowser.refresh();
-      } else {
-        status.failed(e.message);
-      }
-    }),
-  );
+  const saved = context.workspaceState.get<string>(FOLDER_KEY);
+  await openFolder(localFolders().find((f) => f.uri.toString() === saved) ?? localFolders()[0]);
 
-  let indexing: Thenable<void> | undefined;
-  /** `rebuild`: drop the index and build it from scratch; otherwise re-index what changed. */
-  const runIndex = (rebuild: boolean) =>
-    (indexing ??= vscode.window
-      .withProgress(
-        { location: vscode.ProgressLocation.Notification, title: rebuild ? 'RefDex: regenerating index…' : 'RefDex: indexing workspace…' },
-        async () => {
-          try {
-            const result = rebuild ? await daemon.rebuild() : await daemon.reindex(true);
-            const failed = result.failed.length ? `, ${result.failed.length} failed (see Output > RefDex)` : '';
-            for (const f of result.failed) {
-              log.appendLine(`failed: ${f.path}: ${f.error}`);
-            }
-            vscode.window.showInformationMessage(
-              `RefDex: ${result.symbols.toLocaleString()} symbols in ${result.files.toLocaleString()} files ` +
-                `(${result.indexed} indexed${rebuild ? '' : `, ${result.unchanged} unchanged`}${failed}) in ${(result.ms / 1000).toFixed(1)} s.`,
-            );
-          } catch (e) {
-            log.appendLine(String(e));
-            status.failed(e instanceof Error ? e.message : String(e));
-            vscode.window.showErrorMessage(`RefDex: indexing failed: ${e instanceof Error ? e.message : e}`);
-          }
-        },
-      )
-      .then(() => {
-        indexing = undefined;
-      }));
-
-  const browse = () => DatabaseBrowser.show(context, daemon, (table, filter) => exportCsv(daemon, table, filter));
   context.subscriptions.push(
     // Generate when there is no index yet, regenerate from scratch when there is.
-    vscode.commands.registerCommand('refdex.generateIndex', () => runIndex(!!stats?.files)),
-    vscode.commands.registerCommand('refdex.updateIndex', () => runIndex(false)),
-    vscode.commands.registerCommand('refdex.searchSymbols', () => searchSymbols(daemon, log)),
-    vscode.commands.registerCommand('refdex.openDatabase', () => openDatabase(context, daemon)),
-    vscode.commands.registerCommand('refdex.browseDatabase', browse),
-    vscode.commands.registerCommand('refdex.exportCsv', () => exportCsv(daemon)),
+    vscode.commands.registerCommand('refdex.generateIndex', withSession((s) => s.runIndex(s.indexed))),
+    vscode.commands.registerCommand('refdex.updateIndex', withSession((s) => s.runIndex(false))),
+    vscode.commands.registerCommand('refdex.searchSymbols', withSession((s) => searchSymbols(s.daemon, log))),
+    vscode.commands.registerCommand('refdex.openDatabase', withSession((s) => openDatabase(context, s.daemon))),
+    vscode.commands.registerCommand('refdex.browseDatabase', withSession((s) =>
+      DatabaseBrowser.show(context, s.daemon, (table, filter) => exportCsv(s.daemon, table, filter)))),
+    vscode.commands.registerCommand('refdex.exportCsv', withSession((s) => exportCsv(s.daemon))),
+    vscode.commands.registerCommand('refdex.connectClaudeCode', withSession((s) => s.connectClaudeCode())),
+    vscode.commands.registerCommand('refdex.selectFolder', () => selectFolder(storage, session, openFolder)),
     vscode.commands.registerCommand('refdex.toggleWatch', async () => {
       // Change the setting where it is set, so a workspace value does not shadow the change.
       const cfg = vscode.workspace.getConfiguration('refdex');
       const inspected = cfg.inspect<boolean>('watch');
       const target = inspected?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
-      await cfg.update('watch', !options().watch, target);
+      await cfg.update('watch', !cfg.get<boolean>('watch', true), target);
     }),
-    vscode.commands.registerCommand('refdex.connectClaudeCode', () => connectClaudeCode(claude, mcpCommand, refreshClients)),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('refdex')) {
-        log.appendLine('settings changed; restarting the daemon');
-        daemon.restart(options());
-        void showStats();
+        session?.restart();
       }
     }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      // The indexed folder was removed: fall back to the first one. Otherwise just update the count.
+      if (!session || !localFolders().some((f) => f.uri.fsPath === session!.root)) {
+        void openFolder(localFolders()[0]);
+      } else {
+        void session.showStats();
+        void about.refresh();
+      }
+    }),
+    { dispose: () => session?.dispose() },
   );
 
-  daemon.start();
-  await showStats();
-  // Keep an existing Claude Code entry pointing at this version's files, then show client state.
-  await claude.refreshIfStale(mcpCommand());
-  await refreshClients();
-  context.subscriptions.push(
-    daemon.onEvent((e) => {
-      if (e.event === 'indexed' && e.stats.files) {
-        void offerClaudeCode(context, claude, mcpCommand, refreshClients);
-      }
-    }),
-  );
-  if (stats?.files) {
-    void offerClaudeCode(context, claude, mcpCommand, refreshClients);
-  }
   // For the integration tests.
-  return { daemon, clientState };
+  return {
+    get daemon(): Daemon {
+      return session!.daemon;
+    },
+    clientState: () => session!.clientState(),
+    openFolder: (folder: vscode.WorkspaceFolder) => openFolder(folder),
+  };
 }
 
-/** Adds (or removes) RefDex in Claude Code's MCP settings for this project, in the scope the user picks. */
-async function connectClaudeCode(claude: ClaudeCodeSetup, cmd: () => ReturnType<typeof serverCommand>, refresh: () => Promise<void>) {
-  const current = await claude.current();
-  type Item = vscode.QuickPickItem & { scope?: ClaudeScope; disconnect?: boolean };
-  const items: Item[] = [
-    {
-      label: '$(lock) This project, only for me',
-      description: current?.scope === 'local' ? 'current' : 'recommended',
-      detail: 'Adds RefDex to your Claude Code settings for this folder. Nothing is written to the repository.',
-      scope: 'local',
-    },
-    {
-      label: '$(repo) This project, in .mcp.json',
-      description: current?.scope === 'project' ? 'current' : undefined,
-      detail: 'Writes .mcp.json in the workspace root. It holds paths on this machine, so it is not meant to be committed.',
-      scope: 'project',
-    },
-    ...(current ? [{ label: '$(trash) Disconnect', detail: `Remove RefDex from Claude Code (${current.scope === 'local' ? 'your settings' : '.mcp.json'})`, disconnect: true }] : []),
-  ];
-  const picked = await vscode.window.showQuickPick(items, { title: 'Connect RefDex to Claude Code', placeHolder: 'Where should Claude Code find RefDex?' });
-  if (!picked) {
+/** Lets the user pick which workspace folder RefDex indexes and serves to AI clients. */
+async function selectFolder(
+  storage: vscode.Uri,
+  current: FolderSession | undefined,
+  open: (folder: vscode.WorkspaceFolder) => Promise<void>,
+): Promise<void> {
+  const folders = localFolders();
+  if (folders.length < 2) {
+    void vscode.window.showInformationMessage('RefDex: only one folder is open, and RefDex already indexes it.');
     return;
   }
-  try {
-    if (picked.disconnect && current) {
-      await claude.disconnect(current.scope);
-      void vscode.window.showInformationMessage('RefDex: disconnected from Claude Code.');
-    } else if (picked.scope) {
-      if (current && current.scope !== picked.scope) {
-        await claude.disconnect(current.scope);
-      }
-      await claude.connect(picked.scope, cmd());
-      void vscode.window.showInformationMessage(
-        `RefDex: connected to Claude Code for this project. Start a new Claude Code session (or run /mcp) to use it` +
-          (picked.scope === 'project' ? '; Claude Code asks once to approve servers from .mcp.json.' : '.'),
-      );
-    }
-  } catch (e) {
-    void vscode.window.showErrorMessage(`RefDex: could not update Claude Code: ${e instanceof Error ? e.message : e}`);
-  } finally {
-    await refresh();
+  type Item = vscode.QuickPickItem & { folder: vscode.WorkspaceFolder };
+  const items: Item[] = folders.map((folder) => {
+    const isCurrent = folder.uri.fsPath === current?.root;
+    return {
+      label: `$(${isCurrent ? 'check' : 'root-folder'}) ${folder.name}`,
+      description: folder.uri.fsPath,
+      detail: isCurrent ? 'Indexed now' : existsSync(indexPathFor(storage, folder)) ? 'Has an index' : 'Not indexed yet',
+      folder,
+    };
+  });
+  const picked = await vscode.window.showQuickPick(items, {
+    title: 'RefDex: Select Workspace Folder',
+    placeHolder: 'Which folder should RefDex index and serve to AI assistants?',
+  });
+  if (picked) {
+    await open(picked.folder);
   }
 }
 
-/** After the first index, offer once per workspace to connect Claude Code if it is installed. */
-async function offerClaudeCode(
-  context: vscode.ExtensionContext,
-  claude: ClaudeCodeSetup,
-  cmd: () => ReturnType<typeof serverCommand>,
-  refresh: () => Promise<void>,
-) {
-  const key = 'refdex.claudeOffer';
-  if (context.workspaceState.get(key) || !(isInstalled(CLAUDE_CODE_ID) || claude.cli()) || (await claude.current())) {
-    return;
-  }
-  await context.workspaceState.update(key, 'shown');
-  const choice = await vscode.window.showInformationMessage(
-    'RefDex: connect the index to Claude Code, so it can look up code instead of reading whole files?',
-    'Connect',
-    'Not now',
-  );
-  if (choice === 'Connect') {
-    await connectClaudeCode(claude, cmd, refresh);
-  }
-}
-
-async function searchSymbols(daemon: Daemon, log: vscode.OutputChannel) {
+async function searchSymbols(daemon: Daemon, log: vscode.LogOutputChannel) {
   const pick = vscode.window.createQuickPick<vscode.QuickPickItem & { hit?: { path: string; line: number } }>();
   pick.placeholder = 'Search indexed symbols by name (e.g. OrderService or find)';
   pick.matchOnDescription = true;
@@ -268,7 +178,7 @@ async function searchSymbols(daemon: Daemon, log: vscode.OutputChannel) {
         hit: { path: h.path, line: h.start_line },
       }));
     } catch (e) {
-      log.appendLine(String(e));
+      log.error(String(e));
     } finally {
       if (id === request) {
         pick.busy = false;

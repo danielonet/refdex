@@ -15,11 +15,23 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
   private stats: IndexStats | undefined;
   /** Set by the extension once AI clients have been detected. */
   clients: ClientState | undefined;
+  /** The daemon of the indexed folder; replaced when the user switches folders. */
+  private daemon: Daemon | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly daemon: Daemon | undefined,
-  ) {}
+    daemon: Daemon | undefined,
+  ) {
+    this.daemon = daemon;
+  }
+
+  /** Shows another folder's index. */
+  setDaemon(daemon: Daemon | undefined): void {
+    this.daemon = daemon;
+    this.stats = undefined;
+    this.clients = undefined;
+    void this.refresh();
+  }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -84,6 +96,7 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
     const watch = cfg.get<boolean>('watch', true);
     const indexed = !!this.stats?.files;
     const folder = this.daemon ? basename(this.daemon.root) : undefined;
+    const folderCount = vscode.workspace.workspaceFolders?.length ?? 0;
     const nonce = getNonce();
     const row = (key: string, value: string, title?: string) =>
       `<tr><td class="key">${escapeHtml(key)}</td><td class="val"${title ? ` title="${escapeHtml(title)}"` : ''}>${value}</td></tr>`;
@@ -135,7 +148,7 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
 
   <h3>Current configuration</h3>
   <table>
-    ${row('Workspace', escapeHtml(folder ?? '—'), this.daemon?.root)}
+    ${row(folderCount > 1 ? `Workspace (1 of ${folderCount})` : 'Workspace', escapeHtml(folder ?? '—'), this.daemon?.root)}
     ${row('Languages', escapeHtml(languages))}
     ${row('Watch for changes', watch ? 'on' : 'off')}
     ${row('Include', include.length ? include.map(escapeHtml).join('<br>') : 'everything')}
@@ -153,6 +166,7 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
 
   <h3>Actions</h3>
   <button data-command="refdex.generateIndex">${indexed ? 'Regenerate Index' : 'Generate Index'}</button>
+  ${folderCount > 1 ? '<button class="secondary" data-command="refdex.selectFolder">Switch Workspace Folder…</button>' : ''}
   <button class="secondary" data-command="refdex.openDatabase"${indexed ? '' : ' disabled'}>Open Database…</button>
   <button class="secondary" data-command="refdex.searchSymbols"${indexed ? '' : ' disabled'}>Search Symbols</button>
   <button class="secondary" data-command="refdex.connectClaudeCode"${c && (c.claude.installed || c.claude.cliFound) ? '' : ' disabled'}>${c?.claude.scope ? 'Reconnect Claude Code…' : 'Connect Claude Code…'}</button>

@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import * as vscode from 'vscode';
@@ -7,6 +7,8 @@ import type { ClientState } from '../clients';
 import { ClaudeCodeSetup, serverCommand } from '../clients';
 import type { Daemon } from '../daemon';
 import { installedSqliteEditors } from '../openDatabase';
+import { indexPathFor } from '../session';
+import { readUsage, UsageTail } from '../usage';
 
 suite('RefDex extension', () => {
   let daemon: Daemon;
@@ -91,6 +93,39 @@ suite('RefDex extension', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('follows the MCP usage log from its end, across partial lines and rotation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'refdex-usage-'));
+    try {
+      const path = join(dir, 'mcp-usage.jsonl');
+      const call = (tool: string) => `${JSON.stringify({ t: new Date().toISOString(), client: 'claude-code', tool, args: { query: 'x' }, ms: 1, chars: 40 })}\n`;
+      writeFileSync(path, call('old'));
+      const tail = new UsageTail(path);
+      assert.deepStrictEqual(await tail.read(), [], 'history is not replayed');
+      appendFileSync(path, `${JSON.stringify({ t: new Date().toISOString(), client: 'claude-code', event: 'connect' })}\n${call('search_symbols')}{"t":"par`);
+      const records = await tail.read();
+      assert.deepStrictEqual(records.map((r) => r.event ?? r.tool), ['connect', 'search_symbols']);
+      assert.deepStrictEqual(records[1].args, { query: 'x' });
+      appendFileSync(path, `tial","client":"c","tool":"get_repo_map","ms":1,"chars":1}\n`);
+      assert.deepStrictEqual((await tail.read()).map((r) => r.tool), ['get_repo_map']);
+      renameSync(path, `${path}.1`);
+      writeFileSync(path, call('find_references'));
+      assert.deepStrictEqual((await tail.read()).map((r) => r.tool), ['find_references']);
+      // Session lines are not calls.
+      const usage = await readUsage(join(dir, 'index.db'));
+      assert.strictEqual(usage.reduce((n, u) => n + u.calls, 0), 4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps a single-folder index where it always was', () => {
+    const folder = vscode.workspace.workspaceFolders![0];
+    const storage = vscode.Uri.file('/tmp/storage');
+    assert.strictEqual(vscode.workspace.workspaceFile, undefined);
+    assert.strictEqual(indexPathFor(storage, folder), join('/tmp/storage', 'index.db'));
+    assert.strictEqual(daemon.root, folder.uri.fsPath);
   });
 
   test('finds SQLite viewer extensions by their custom editor pattern', () => {

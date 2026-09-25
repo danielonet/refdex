@@ -22,25 +22,28 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
   const server = new McpServer({ name: 'refdex', title: 'RefDex code index', version }, { instructions: INSTRUCTIONS });
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   const usage = new UsageLog(dbPath);
-  let announced = false;
-  /** Runs a tool, logs the call with the client's name, and wraps the text as MCP content. */
-  const run = async (tool: string, fn: () => Promise<string>) => {
-    const started = performance.now();
-    const text = await fn();
+  const clientInfo = () => {
     const client = server.server.getClientVersion();
-    if (!announced) {
-      announced = true;
-      process.stderr.write(`refdex mcp: serving ${client?.name ?? 'unknown client'} ${client?.version ?? ''} for ${root}\n`);
+    return { client: client?.name ?? 'unknown', clientVersion: client?.version };
+  };
+  server.server.oninitialized = () => {
+    const { client, clientVersion } = clientInfo();
+    process.stderr.write(`refdex mcp: serving ${client} ${clientVersion ?? ''} for ${root}\n`);
+    void usage.record({ t: new Date().toISOString(), ...clientInfo(), event: 'connect' });
+  };
+  /** Runs a tool, logs the call and its arguments with the client's name, and wraps the text as MCP content. */
+  const run = async (tool: string, args: Record<string, unknown>, fn: () => Promise<string>) => {
+    const started = performance.now();
+    const t = new Date().toISOString();
+    try {
+      const text = await fn();
+      void usage.record({ t, ...clientInfo(), tool, args, ms: Math.round(performance.now() - started), chars: text.length });
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      void usage.record({ t, ...clientInfo(), tool, args, ms: Math.round(performance.now() - started), chars: 0, error });
+      throw e;
     }
-    void usage.record({
-      t: new Date().toISOString(),
-      client: client?.name ?? 'unknown',
-      clientVersion: client?.version,
-      tool,
-      ms: Math.round(performance.now() - started),
-      chars: text.length,
-    });
-    return { content: [{ type: 'text' as const, text }] };
   };
 
   server.registerTool(
@@ -61,7 +64,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    (args) => run('search_symbols', () => tools.searchSymbols(args)),
+    (args) => run('search_symbols', args, () => tools.searchSymbols(args)),
   );
 
   server.registerTool(
@@ -77,7 +80,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    (args) => run('get_file_outline', () => tools.getFileOutline(args)),
+    (args) => run('get_file_outline', args, () => tools.getFileOutline(args)),
   );
 
   server.registerTool(
@@ -98,7 +101,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    (args) => run('get_symbol_source', () => tools.getSymbolSource(args)),
+    (args) => run('get_symbol_source', args, () => tools.getSymbolSource(args)),
   );
 
   server.registerTool(
@@ -114,7 +117,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    (args) => run('find_references', () => tools.findReferences(args)),
+    (args) => run('find_references', args, () => tools.findReferences(args)),
   );
 
   server.registerTool(
@@ -131,7 +134,7 @@ export async function serveMcp(root: string, dbPath: string, version: string): P
       },
       annotations: readOnly,
     },
-    (args) => run('get_repo_map', () => tools.getRepoMap(args)),
+    (args) => run('get_repo_map', args, () => tools.getRepoMap(args)),
   );
 
   const transport = new StdioServerTransport();
