@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 
 plugins {
@@ -32,6 +33,9 @@ kotlin {
         // Match the Kotlin stdlib bundled with the oldest supported IDE.
         apiVersion = KotlinVersion.KOTLIN_2_2
         languageVersion = KotlinVersion.KOTLIN_2_2
+        // Call the platform's interface defaults directly instead of generating overriding stubs,
+        // which the Plugin Verifier reports as overrides of deprecated methods.
+        jvmDefault = JvmDefaultMode.NO_COMPATIBILITY
     }
 }
 

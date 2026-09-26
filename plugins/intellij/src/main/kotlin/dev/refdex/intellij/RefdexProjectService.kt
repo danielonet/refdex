@@ -1,6 +1,6 @@
 package dev.refdex.intellij
 
-import com.intellij.ide.plugins.PluginManagerCore
+import com.intellij.ide.plugins.cl.PluginAwareClassLoader
 import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
@@ -9,7 +9,6 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
@@ -21,7 +20,6 @@ import dev.refdex.intellij.daemon.DaemonLocator
 import dev.refdex.intellij.daemon.DaemonNotFoundException
 import dev.refdex.intellij.daemon.IndexStats
 import dev.refdex.intellij.daemon.IndexSummary
-import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -54,30 +52,31 @@ class RefdexProjectService(private val project: Project) : Disposable {
     /** Whether AI clients get the tools, and why; see [aiTools]. */
     data class AiToolsState(val enabled: Boolean, val reason: String)
 
-    /** Starts the daemon (a background thread: it spawns a process) and shows what the index holds. */
+    /**
+     * Starts the daemon (a background thread: it spawns a process) and shows what the index holds.
+     * Never throws: it runs as a startup activity, where an exception is reported as a plugin
+     * error. Problems show in the status bar instead.
+     */
     fun start() {
-        val client = try {
-            DaemonClient(locate().with(RefdexSettings.getInstance(project).daemonOptions().serveArgs(root.toString(), dbPath.toString()))) { LOG.info(it) }
+        try {
+            startDaemon()
         } catch (e: DaemonNotFoundException) {
             fail(e.message!!)
-            return
-        } catch (e: IOException) {
-            fail("could not prepare the RefDex daemon: ${e.message}")
-            return
+        } catch (e: Exception) {
+            LOG.warn("RefDex: could not start the daemon", e)
+            fail("could not start the RefDex daemon: ${e.message}")
         }
+    }
+
+    private fun startDaemon() {
+        val client = DaemonClient(locate().with(RefdexSettings.getInstance(project).daemonOptions().serveArgs(root.toString(), dbPath.toString()))) { LOG.info(it) }
         client.onEvent(::onEvent)
         synchronized(this) {
             daemon?.stop()
             daemon = client
         }
         LOG.info("RefDex: indexing $root; index at $dbPath")
-        try {
-            client.start()
-        } catch (e: IOException) {
-            // Shown in the status bar; a startup activity must not throw.
-            fail("could not start the RefDex daemon: ${e.message}")
-            return
-        }
+        client.start()
         refreshStats()
         ClientSetup.forProject(this).refreshStale()
     }
@@ -217,7 +216,6 @@ class RefdexProjectService(private val project: Project) : Disposable {
 
     companion object {
         private val LOG = logger<RefdexProjectService>()
-        const val PLUGIN_ID = "dev.refdex"
         const val NOTIFICATIONS = "RefDex"
         private const val OFFERED_KEY = "refdex.connectOffered"
 
@@ -226,7 +224,17 @@ class RefdexProjectService(private val project: Project) : Disposable {
 
         fun getInstance(project: Project): RefdexProjectService = project.getService(RefdexProjectService::class.java)
 
-        fun daemonDir(): Path = PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))!!.pluginPath.resolve("daemon")
+        /**
+         * `<plugin>/daemon`. Inside the IDE, the plugin's class loader knows the plugin's folder (its
+         * classes have no code source location there). Elsewhere, as in tests, the folder is the
+         * one above the jar or classes directory.
+         */
+        fun daemonDir(): Path {
+            val cls = RefdexProjectService::class.java
+            val plugin = (cls.classLoader as? PluginAwareClassLoader)?.pluginDescriptor?.pluginPath
+                ?: Path.of(PathManager.getJarPathForClass(cls) ?: error("cannot tell where the RefDex plugin is installed")).parent.parent
+            return plugin.resolve("daemon")
+        }
 
         /** The IDE's system directory, like the VS Code extension's workspace storage: outside the project. */
         fun indexPathFor(root: Path): Path {

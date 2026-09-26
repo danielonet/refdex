@@ -27,7 +27,7 @@ class DaemonLocatorTest {
     @Test
     fun `prefers this platform's executable`() {
         val dir = daemonDir("linux-x64")
-        val launch = DaemonLocator(dir, "linux", "x64") { node }.locate()
+        val launch = DaemonLocator(dir, "linux", "x64", findOnPath = { node }).locate()
         assertEquals(listOf(dir.resolve("linux-x64/refdex").toString()), launch.command)
     }
 
@@ -36,7 +36,7 @@ class DaemonLocatorTest {
         val dir = daemonDir("linux-x64")
         val exe = dir.resolve("linux-x64/refdex")
         exe.toFile().setExecutable(false)
-        DaemonLocator(dir, "linux", "x64") { node }.locate()
+        DaemonLocator(dir, "linux", "x64", findOnPath = { node }).locate()
         assertTrue(Files.isExecutable(exe))
     }
 
@@ -47,7 +47,7 @@ class DaemonLocatorTest {
         exe.toFile().setExecutable(false)
         val runDir = tmp.newFolder("run").toPath()
         // A chmod that has no effect, as on a read-only or noexec folder.
-        val locator = DaemonLocator(dir, "linux", "x64", { node }, runDir) {}
+        val locator = DaemonLocator(dir, "linux", "x64", findOnPath = { node }, runDir = runDir, makeExecutable = {})
         val first = Path.of(locator.locate().command.single())
         assertTrue(first.startsWith(runDir) && Files.isExecutable(first))
         assertEquals("reuses the copy", first, Path.of(locator.locate().command.single()))
@@ -56,14 +56,14 @@ class DaemonLocatorTest {
     @Test
     fun `falls back to Node on PATH running the bundle`() {
         val dir = daemonDir("linux-x64")
-        val launch = DaemonLocator(dir, "darwin", "arm64") { node }.locate()
+        val launch = DaemonLocator(dir, "darwin", "arm64", findOnPath = { node }).locate()
         assertEquals(listOf(node.toString(), dir.resolve("refdex.cjs").toString()), launch.command)
         assertEquals(listOf(node.toString(), dir.resolve("refdex.cjs").toString(), "serve"), launch.with("serve"))
     }
 
     @Test
     fun `explains what to install without an executable or Node`() {
-        val e = assertThrows(DaemonNotFoundException::class.java) { DaemonLocator(daemonDir(), "win32", "arm64") { null }.locate() }
+        val e = assertThrows(DaemonNotFoundException::class.java) { DaemonLocator(daemonDir(), "win32", "arm64", findOnPath = { null }).locate() }
         assertTrue(e.message!!, e.message!!.contains("win32-arm64") && e.message!!.contains("Node.js"))
     }
 
@@ -72,7 +72,7 @@ class DaemonLocatorTest {
         val dir = daemonDir("linux-x64")
         val exe = tmp.newFile("my-refdex").toPath()
         val bundle = tmp.newFile("refdex.cjs").toPath()
-        val locator = DaemonLocator(dir, "linux", "x64") { node }
+        val locator = DaemonLocator(dir, "linux", "x64", findOnPath = { node })
         assertEquals(listOf(exe.toString()), locator.locate(exe.toString()).command)
         assertEquals(listOf(node.toString(), bundle.toString()), locator.locate(bundle.toString()).command)
         assertThrows(DaemonNotFoundException::class.java) { locator.locate("/nowhere/refdex") }
