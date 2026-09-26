@@ -263,16 +263,32 @@ Tools only where they pay off (2026-09-25):
 - [ ] Fixture repo per language covering its edge cases
 - [ ] Performance test on a large repo
 - [ ] Token-usage comparison with and without the index
-- [ ] Package `.vsix` and publish to the Marketplace
+- [x] Package `.vsix` and publish to the Marketplace (0.1.3 is live)
 
 ### Phase 6: IntelliJ plugin
 
-- [ ] Scaffold Kotlin plugin with the IntelliJ Platform Gradle plugin
-- [ ] Launch the bundled daemon executable per platform
-- [ ] Detect installed AI plugins and write MCP config
-- [ ] Status widget, "Reindex project" action, settings page
-- [ ] Confirm current MCP support in Copilot for JetBrains and JetBrains AI Assistant
-- [ ] Publish to the JetBrains Marketplace
+- [x] Scaffold Kotlin plugin with the IntelliJ Platform Gradle plugin
+- [ ] Launch the bundled daemon executable per platform (Linux x64 done; macOS and Windows need CI builds)
+- [x] Detect installed AI plugins and write MCP config
+- [x] Status widget, "Reindex project" action, settings page
+- [x] Confirm current MCP support in Copilot for JetBrains and JetBrains AI Assistant
+- [ ] Publish to the JetBrains Marketplace (0.1.2 uploaded, waiting for JetBrains' review)
+
+Phase 6 notes (2026-09-26):
+
+- **Build:** Kotlin 2.4 with the IntelliJ Platform Gradle Plugin 2.19 and Gradle 9.8, targeting IntelliJ 2025.3 (build 253, the first unified IntelliJ IDEA distribution) and later. `scripts/build-intellij.sh` builds the zip, `scripts/install-intellij.sh` installs it into every local JetBrains IDE 2025.3+, and `-PverifyIde=<IDE folder>` runs the Plugin Verifier against an installed IDE. Against IntelliJ 2026.2 it reports Compatible, with no internal or deprecated API usages.
+- **Daemon:** Gradle runs `npm run build:sea` and `packages/server/scripts/stage-daemon.mjs`, which puts `refdex.cjs`, the grammars and this platform's single executable into the plugin's `daemon/` folder. The plugin tries, in order: a daemon path set in settings, the executable for this platform, then Node.js 22.13+ on PATH running `refdex.cjs`. The executable is 135 MB, and the plugin zip 43 MB.
+- **Executable bit:** the zip must store the executable as `rwxr-xr-x`, or the daemon can't start. The first Marketplace upload failed JetBrains' IDE test with "Permission denied". The plugin now also restores the bit itself, and if its folder is read-only or noexec it runs a copy from the IDE's system directory.
+- **Index:** kept in the IDE's system directory (`<system>/refdex/<project>-<hash>/index.db`), outside the project, like VS Code's workspace storage. `mcp-usage.jsonl` sits beside it.
+- **Protocol:** the Kotlin client speaks the daemon's JSON-lines protocol (`serve.ts`) directly, with Gson bundled, since IntelliJ 2025.3 no longer provides it to plugins. `DaemonClient` and the MCP config writers don't use IntelliJ APIs, so they are unit-tested against the real daemon without an IDE (16 tests).
+- **AI clients:** "Connect AI Client…" writes these entries, and existing ones are rewritten when an update moves the daemon or the AI tools settings change:
+  - Claude Code: local scope via `claude mcp add-json`, or the project's `.mcp.json`.
+  - Junie: the project's `.junie/mcp/mcp.json`.
+  - Copilot for JetBrains: it reads only a global `~/.config/github-copilot/intellij/mcp.json` (under `servers`), so each project gets its own entry, `refdex-<project>`, and the IDE needs a restart.
+  - AI Assistant: has no file other plugins can write, so RefDex copies a snippet to paste into its MCP settings.
+- **Verified:** on guava (about 7.3 million tokens of code), Copilot for JetBrains connects as client "Copilot MCP Gateway" with the tools on. Copilot offers MCP tools only in agent mode.
+- **Deviation:** the plugin finds its own folder through its `PluginAwareClassLoader`. `PluginManagerCore.getPlugin` and `PluginManager.getPluginByClass` are internal API, and a class's code source location is null inside the IDE.
+- **Open:** daemon executables for macOS and Windows (CI); replacing `StatusBarWidget.getPresentation()`, which the 2026.3 EAP deprecates; and indexing a project automatically the first time it opens, instead of waiting for "Reindex Project".
 
 ## Testing and success metrics
 
@@ -295,7 +311,7 @@ The biggest early risk is packaging the daemon with SQLite as a single executabl
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Daemon with SQLite fails to build as a single executable on some platform | Blocks both IDEs | Works on Linux x64 with `node:sqlite` (Phase 0); verify macOS and Windows in CI; fall back to a WASM SQLite build |
-| JetBrains AI clients have limited MCP support | IntelliJ plugin less useful | Confirm support before Phase 6; Claude Code works from any terminal regardless |
+| JetBrains AI clients have limited MCP support | IntelliJ plugin less useful | Confirmed in Phase 6: Junie and Copilot read MCP config files, AI Assistant takes a pasted config; Claude Code works from any terminal regardless |
 | Stale index misleads the AI | Wrong answers | Hash-based updates; timestamps in every result; source read from disk |
 | C# namespace and partial-class resolution is complex | Phase 1 overruns | Build C# last, reusing the Java resolver |
 | Python dynamic imports can't be resolved statically | Missing edges | Record as unresolved; don't guess |

@@ -51,7 +51,7 @@
       <li><b>Always up to date.</b> When you save a file, only that file is parsed again, in milliseconds.</li>
       <li><b>Never stale.</b> Code is read from disk whenever the agent asks, so it always sees what you see.</li>
       <li><b>Private.</b> Everything runs on your machine. No code leaves it, and there's no account to create.</li>
-      <li><b>Nothing else to install.</b> The indexer comes with the plugin.</li>
+      <li><b>Nothing else to install on Linux.</b> The indexer comes with the plugin. On Windows and macOS, RefDex runs it with your Node.js 22.13 or later for now; built-in support is on its way.</li>
     </ul>
 
     <h3>Getting started</h3>
