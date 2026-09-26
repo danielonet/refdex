@@ -17,6 +17,7 @@
     "build:sea": "npm run build:sea -w @refdex/server",
     "build:icon-font": "node scripts/build-icon-font.js",
     "vsix:install": "scripts/build-and-install.sh",
+    "build:intellij": "scripts/build-intellij.sh",
     "vsix:uninstall": "scripts/uninstall.sh",
     "publish:marketplace": "scripts/publish-marketplace.sh",
     "test": "npm test -w @refdex/core -w @refdex/server"

@@ -45,39 +45,8 @@ skip_or_fail() {
   RESULTS+=("$target: skipped ($reason)")
 }
 
-# Node must be new enough for this repo (TypeScript runs through Node's type stripping, which
-# needs 22.18+; @vscode/vsce needs 20+). If the shell resolved an older Node (a fresh terminal
-# that hasn't sourced nvm, or a non-interactive runner), try nvm with the repo's .nvmrc.
-REQUIRED_NODE="22.18"
-
-node_is_new_enough() {
-  command -v node >/dev/null 2>&1 &&
-    node -e '
-      const [maj, min] = process.versions.node.split(".").map(Number);
-      const [rmaj, rmin] = process.argv[1].split(".").map(Number);
-      process.exit(maj > rmaj || (maj === rmaj && min >= rmin) ? 0 : 1);
-    ' "$REQUIRED_NODE"
-}
-
-ensure_node() {
-  node_is_new_enough && return 0
-  echo "==> Node $(node -v 2>/dev/null || echo 'not found') is too old (needs >= $REQUIRED_NODE); looking for nvm..."
-  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-  if [ -s "$NVM_DIR/nvm.sh" ]; then
-    # shellcheck disable=SC1091
-    \. "$NVM_DIR/nvm.sh"
-    # .nvmrc at the repo root pins the major version.
-    nvm install >/dev/null
-    nvm use >/dev/null
-    echo "==> Switched to Node $(node -v) via nvm"
-  fi
-  if ! node_is_new_enough; then
-    echo "!! Still on Node $(node -v 2>/dev/null || echo 'not found'). Install nvm (https://github.com/nvm-sh/nvm)" >&2
-    echo "   and run: nvm install $(cat "$ROOT_DIR/.nvmrc")" >&2
-    echo "   then re-run this script." >&2
-    exit 1
-  fi
-}
+# shellcheck source=lib/node.sh
+source "$ROOT_DIR/scripts/lib/node.sh"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -171,48 +140,19 @@ install_intellij() {
   echo
   echo "==> IntelliJ plugin"
 
-  # 1. The plugin project (Phase 6 of the plan). Until it is scaffolded there is nothing to build.
-  local gradle=""
-  if [ -x "$INTELLIJ_DIR/gradlew" ]; then
-    gradle="./gradlew"
-  elif [ -f "$INTELLIJ_DIR/build.gradle.kts" ] || [ -f "$INTELLIJ_DIR/build.gradle" ]; then
-    command -v gradle >/dev/null 2>&1 && gradle="gradle"
-  else
-    skip_or_fail intellij "no Gradle project in plugins/intellij yet (the IntelliJ plugin is Phase 6 of the plan)"
+  # 1. Build the plugin zip (and the daemon it bundles) -> plugins/intellij/build/distributions/.
+  if [ ! -x "$INTELLIJ_DIR/gradlew" ]; then
+    skip_or_fail intellij "plugins/intellij has no gradlew wrapper"
     return
   fi
-  if [ -z "$gradle" ]; then
-    skip_or_fail intellij "plugins/intellij has no gradlew wrapper and 'gradle' is not on PATH"
+  if ! (scripts/build-intellij.sh); then
+    skip_or_fail intellij "scripts/build-intellij.sh failed (see above)"
     return
   fi
-
-  # 2. The IntelliJ Platform Gradle plugin needs a JDK (17 or newer).
-  if ! command -v java >/dev/null 2>&1 && [ -z "${JAVA_HOME:-}" ]; then
-    skip_or_fail intellij "no JDK found (install JDK 17+ or set JAVA_HOME)"
-    return
-  fi
-
-  # 3. The plugin bundles the RefDex daemon, so the daemon bundle must be current.
-  ensure_node
-  if [ ! -d node_modules ]; then
-    echo "==> Installing npm dependencies..."
-    npm install
-  fi
-  echo "==> Building the daemon bundle..."
-  npm run build -w @refdex/server
-
-  # 4. Build the plugin zip -> plugins/intellij/build/distributions/<name>-<version>.zip.
-  echo "==> Building plugin with '$gradle buildPlugin'..."
-  (cd "$INTELLIJ_DIR" && $gradle buildPlugin)
   local zip
-  zip="$(ls -t "$INTELLIJ_DIR"/build/distributions/*.zip 2>/dev/null | awk 'NR == 1' || true)"
-  if [ -z "$zip" ]; then
-    echo "!! buildPlugin produced no zip in plugins/intellij/build/distributions" >&2
-    exit 1
-  fi
-  echo "==> Built $zip"
+  zip="$(ls -t "$INTELLIJ_DIR"/build/distributions/*.zip | awk 'NR == 1')"
 
-  # 5. Unpack into every JetBrains IDE's plugin folder, replacing an older copy.
+  # 2. Unpack into every JetBrains IDE's plugin folder, replacing an older copy.
   if ! command -v unzip >/dev/null 2>&1; then
     skip_or_fail intellij "'unzip' is not installed. Install manually: Settings -> Plugins -> gear -> 'Install Plugin from Disk...' -> $zip"
     return

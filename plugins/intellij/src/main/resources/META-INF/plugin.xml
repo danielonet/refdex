@@ -1,0 +1,41 @@
+<idea-plugin>
+    <id>dev.refdex</id>
+    <name>RefDex</name>
+    <vendor email="danielonnet@gmail.com">Daniel Driechlinger</vendor>
+    <description><![CDATA[
+    <p>A method-level code index for AI clients. RefDex parses your Python, TypeScript, Java and C# code
+    into a local SQLite index and serves it over MCP, so Claude Code, Junie and GitHub Copilot can search
+    symbols, read outlines and fetch single methods instead of opening whole files.</p>
+    <ul>
+      <li>Indexes the project in the background and keeps the index up to date as files change.</li>
+      <li>Connects Claude Code, Junie and GitHub Copilot in one step, and copies a ready-made config for AI Assistant.</li>
+      <li>Offers its tools only where they pay off: on a small codebase, reading files is cheaper.</li>
+    </ul>
+    <p>Everything runs locally; no code leaves your machine.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="dev.refdex.intellij.RefdexStartup"/>
+        <statusBarWidgetFactory id="RefDex.Status" implementation="dev.refdex.intellij.RefdexStatusWidgetFactory" order="first"/>
+        <projectConfigurable parentId="tools" id="dev.refdex.settings" displayName="RefDex"
+                             instance="dev.refdex.intellij.RefdexConfigurable"/>
+        <notificationGroup id="RefDex" displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <group id="RefDex.Menu" text="RefDex" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="RefDex.Reindex" class="dev.refdex.intellij.ReindexAction" text="Reindex Project"
+                    description="Index new and changed files"/>
+            <action id="RefDex.Rebuild" class="dev.refdex.intellij.RebuildIndexAction" text="Rebuild Index"
+                    description="Drop the index and build it again from scratch"/>
+            <separator/>
+            <action id="RefDex.ConnectAiClient" class="dev.refdex.intellij.ConnectAiClientAction" text="Connect AI Client…"
+                    description="Register RefDex's MCP server with Claude Code, Junie or GitHub Copilot"/>
+            <action id="RefDex.Settings" class="dev.refdex.intellij.OpenSettingsAction" text="Settings…"
+                    description="Open RefDex's settings"/>
+        </group>
+    </actions>
+</idea-plugin>
