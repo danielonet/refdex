@@ -100,16 +100,16 @@
     </extensions>
 
     <actions>
-        <group id="RefDex.Menu" text="RefDex" popup="true">
+        <group id="RefDex.Menu" text="RefDex" popup="true" icon="/icons/refdex.svg">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
-            <action id="RefDex.Reindex" class="dev.refdex.intellij.ReindexAction" text="Reindex Project"
+            <action id="RefDex.Reindex" class="dev.refdex.intellij.ReindexAction" text="Reindex Project" icon="AllIcons.Actions.Refresh"
                     description="Index new and changed files"/>
-            <action id="RefDex.Rebuild" class="dev.refdex.intellij.RebuildIndexAction" text="Rebuild Index"
+            <action id="RefDex.Rebuild" class="dev.refdex.intellij.RebuildIndexAction" text="Rebuild Index" icon="AllIcons.Actions.ForceRefresh"
                     description="Drop the index and build it again from scratch"/>
             <separator/>
-            <action id="RefDex.ConnectAiClient" class="dev.refdex.intellij.ConnectAiClientAction" text="Connect AI Client…"
+            <action id="RefDex.ConnectAiClient" class="dev.refdex.intellij.ConnectAiClientAction" text="Connect AI Client…" icon="AllIcons.Nodes.Plugin"
                     description="Register RefDex's MCP server with Claude Code, Junie or GitHub Copilot"/>
-            <action id="RefDex.Settings" class="dev.refdex.intellij.OpenSettingsAction" text="Settings…"
+            <action id="RefDex.Settings" class="dev.refdex.intellij.OpenSettingsAction" text="Settings…" icon="AllIcons.General.Settings"
                     description="Open RefDex's settings"/>
         </group>
     </actions>

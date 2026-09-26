@@ -59,7 +59,7 @@ class RefdexConfigurable(private val project: Project) : BoundConfigurable("RefD
             }
             group("Advanced") {
                 row("Daemon:") {
-                    textFieldWithBrowseButton(FileChooserDescriptorFactory.createSingleFileDescriptor().withTitle("RefDex Daemon"), project)
+                    textFieldWithBrowseButton(FileChooserDescriptorFactory.singleFile().withTitle("RefDex Daemon"), project)
                         .bindText(::daemonPath).align(AlignX.FILL)
                         .comment("A refdex executable or refdex.cjs bundle to use instead of the built-in daemon. Empty uses the built-in one.")
                 }

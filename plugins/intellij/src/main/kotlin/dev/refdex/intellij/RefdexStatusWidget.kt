@@ -1,19 +1,17 @@
 package dev.refdex.intellij
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.impl.SimpleDataContext
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.openapi.ui.popup.ListPopup
 import com.intellij.openapi.wm.StatusBar
 import com.intellij.openapi.wm.StatusBarWidget
 import com.intellij.openapi.wm.StatusBarWidgetFactory
-import com.intellij.ui.awt.RelativePoint
-import com.intellij.util.Consumer
-import java.awt.Component
-import java.awt.Point
-import java.awt.event.MouseEvent
 import java.text.NumberFormat
+import javax.swing.Icon
 
 class RefdexStatusWidgetFactory : StatusBarWidgetFactory {
     override fun getId() = RefdexStatusWidget.ID
@@ -22,8 +20,8 @@ class RefdexStatusWidgetFactory : StatusBarWidgetFactory {
     override fun createWidget(project: Project): StatusBarWidget = RefdexStatusWidget(project)
 }
 
-/** "RefDex: 80 files" with the details in its tooltip; a click opens the RefDex menu. */
-class RefdexStatusWidget(private val project: Project) : StatusBarWidget, StatusBarWidget.TextPresentation {
+/** The RefDex icon and "80 files", with the details in its tooltip; a click opens the RefDex menu. */
+class RefdexStatusWidget(private val project: Project) : StatusBarWidget, StatusBarWidget.MultipleTextValuesPresentation {
     private var statusBar: StatusBar? = null
 
     override fun ID() = ID
@@ -37,12 +35,14 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
 
     private val service get() = RefdexProjectService.getInstance(project)
 
-    override fun getText(): String = when (val s = service.status) {
+    override fun getSelectedValue(): String = when (service.status) {
         RefdexProjectService.Status.Starting -> "RefDex"
-        RefdexProjectService.Status.Indexing -> "RefDex: indexing…"
+        RefdexProjectService.Status.Indexing -> "indexing…"
         is RefdexProjectService.Status.Failed -> "RefDex: error"
-        RefdexProjectService.Status.Ready -> service.stats?.takeIf { it.files > 0 }?.let { "RefDex: ${NumberFormat.getIntegerInstance().format(it.files)} files" } ?: "RefDex: not indexed"
+        RefdexProjectService.Status.Ready -> service.stats?.takeIf { it.files > 0 }?.let { "${NumberFormat.getIntegerInstance().format(it.files)} files" } ?: "not indexed"
     }
+
+    override fun getIcon(): Icon = if (service.status is RefdexProjectService.Status.Failed) AllIcons.General.Warning else RefdexIcons.Logo
 
     override fun getTooltipText(): String {
         val service = service
@@ -57,16 +57,10 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
             "AI tools ${if (tools.enabled) "on" else "off"}: ${tools.reason}</html>"
     }
 
-    override fun getAlignment() = Component.CENTER_ALIGNMENT
-
-    override fun getClickConsumer() = Consumer<MouseEvent> { e ->
-        val group = ActionManager.getInstance().getAction("RefDex.Menu") as ActionGroup
-        val popup = JBPopupFactory.getInstance().createActionGroupPopup(
-            "RefDex", group, SimpleDataContext.getProjectContext(project), JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
-        )
-        val size = popup.content.preferredSize
-        popup.show(RelativePoint(e.component, Point(0, -size.height)))
-    }
+    override fun getPopup(): ListPopup = JBPopupFactory.getInstance().createActionGroupPopup(
+        "RefDex", ActionManager.getInstance().getAction("RefDex.Menu") as ActionGroup, SimpleDataContext.getProjectContext(project),
+        JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
+    )
 
     override fun dispose() {
         statusBar = null

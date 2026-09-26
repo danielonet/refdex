@@ -97,7 +97,13 @@ class ConnectAiClientAction : RefdexAction() {
         }
 
         private fun copyAiAssistantConfig(project: Project, setup: ClientSetup) {
-            CopyPasteManager.getInstance().setContents(StringSelection(setup.aiAssistantSnippet()))
+            val snippet = try {
+                setup.aiAssistantSnippet()
+            } catch (e: Exception) {
+                RefdexProjectService.getInstance(project).notify("AI Assistant: ${e.message}", NotificationType.ERROR)
+                return
+            }
+            CopyPasteManager.getInstance().setContents(StringSelection(snippet))
             RefdexProjectService.getInstance(project).notify(
                 "Copied RefDex's MCP config. Paste it in Settings | Tools | AI Assistant | Model Context Protocol (Add, then \"As JSON\").",
             )

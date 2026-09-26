@@ -32,6 +32,28 @@ class DaemonLocatorTest {
     }
 
     @Test
+    fun `makes the executable executable again`() {
+        val dir = daemonDir("linux-x64")
+        val exe = dir.resolve("linux-x64/refdex")
+        exe.toFile().setExecutable(false)
+        DaemonLocator(dir, "linux", "x64") { node }.locate()
+        assertTrue(Files.isExecutable(exe))
+    }
+
+    @Test
+    fun `runs a copy when the plugin folder does not allow execution`() {
+        val dir = daemonDir("linux-x64")
+        val exe = dir.resolve("linux-x64/refdex")
+        exe.toFile().setExecutable(false)
+        val runDir = tmp.newFolder("run").toPath()
+        // A chmod that has no effect, as on a read-only or noexec folder.
+        val locator = DaemonLocator(dir, "linux", "x64", { node }, runDir) {}
+        val first = Path.of(locator.locate().command.single())
+        assertTrue(first.startsWith(runDir) && Files.isExecutable(first))
+        assertEquals("reuses the copy", first, Path.of(locator.locate().command.single()))
+    }
+
+    @Test
     fun `falls back to Node on PATH running the bundle`() {
         val dir = daemonDir("linux-x64")
         val launch = DaemonLocator(dir, "darwin", "arm64") { node }.locate()

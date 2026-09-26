@@ -44,13 +44,20 @@ intellijPlatform {
         }
     }
     buildSearchableOptions = false
+    pluginVerification {
+        ides {
+            // -PverifyIde=<path of an installed IDE> checks against that IDE, without downloading any.
+            val local = providers.gradleProperty("verifyIde")
+            if (local.isPresent) local(local.get()) else recommended()
+        }
+    }
 }
 
 // ---- the daemon: built by npm in packages/server, staged into build/daemon, shipped as <plugin>/daemon ----
 val repoRoot = layout.projectDirectory.dir("../..")
 val daemonDir = layout.buildDirectory.dir("daemon")
 
-val buildDaemon by tasks.registering(Exec::class) {
+val buildDaemon = tasks.register<Exec>("buildDaemon") {
     description = "Builds the RefDex daemon bundle and this platform's single executable (npm run build:sea)."
     workingDir = repoRoot.asFile
     commandLine("npm", "run", "build:sea", "-w", "@refdex/server")
@@ -62,7 +69,7 @@ val buildDaemon by tasks.registering(Exec::class) {
     onlyIf { !skip.isPresent }
 }
 
-val stageDaemon by tasks.registering(Exec::class) {
+val stageDaemon = tasks.register<Exec>("stageDaemon") {
     description = "Collects refdex.cjs, the grammars and the executable into build/daemon."
     dependsOn(buildDaemon)
     workingDir = repoRoot.asFile
@@ -76,6 +83,12 @@ tasks {
         dependsOn(stageDaemon)
         from(daemonDir) {
             into(intellijPlatform.projectName.map { "$it/daemon" })
+        }
+    }
+    buildPlugin {
+        // The zip would store the daemon executables without their executable bit.
+        filesMatching("**/daemon/*/refdex*") {
+            permissions { unix("rwxr-xr-x") }
         }
     }
     test {

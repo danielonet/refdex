@@ -21,6 +21,7 @@ import dev.refdex.intellij.daemon.DaemonLocator
 import dev.refdex.intellij.daemon.DaemonNotFoundException
 import dev.refdex.intellij.daemon.IndexStats
 import dev.refdex.intellij.daemon.IndexSummary
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -60,6 +61,9 @@ class RefdexProjectService(private val project: Project) : Disposable {
         } catch (e: DaemonNotFoundException) {
             fail(e.message!!)
             return
+        } catch (e: IOException) {
+            fail("could not prepare the RefDex daemon: ${e.message}")
+            return
         }
         client.onEvent(::onEvent)
         synchronized(this) {
@@ -67,7 +71,13 @@ class RefdexProjectService(private val project: Project) : Disposable {
             daemon = client
         }
         LOG.info("RefDex: indexing $root; index at $dbPath")
-        client.start()
+        try {
+            client.start()
+        } catch (e: IOException) {
+            // Shown in the status bar; a startup activity must not throw.
+            fail("could not start the RefDex daemon: ${e.message}")
+            return
+        }
         refreshStats()
         ClientSetup.forProject(this).refreshStale()
     }
@@ -176,7 +186,8 @@ class RefdexProjectService(private val project: Project) : Disposable {
         return ServerCommand(cmd.first(), cmd.drop(1))
     }
 
-    private fun locate() = DaemonLocator(daemonDir()).locate(RefdexSettings.getInstance(project).state.daemonPath)
+    private fun locate() = DaemonLocator(daemonDir(), runDir = Path.of(PathManager.getSystemPath(), "refdex", "bin"))
+        .locate(RefdexSettings.getInstance(project).state.daemonPath)
 
     /** After the first index, suggest connecting an AI client, once per project. */
     private fun offerConnect() {

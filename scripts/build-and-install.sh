@@ -10,6 +10,9 @@
 # Usage:
 #   scripts/build-and-install.sh [all|vscode|intellij]     (default: all)
 #
+# INTELLIJ_BUILD_ARGS passes options to scripts/build-intellij.sh, e.g.
+#   INTELLIJ_BUILD_ARGS=--test scripts/build-and-install.sh intellij
+#
 # With "all", a target that cannot be built here (no VS Code CLI, no IntelliJ plugin project yet,
 # no JDK, no JetBrains IDE) is skipped with a message; naming a single target makes that an error.
 #
@@ -145,14 +148,17 @@ install_intellij() {
     skip_or_fail intellij "plugins/intellij has no gradlew wrapper"
     return
   fi
-  if ! (scripts/build-intellij.sh); then
+  if ! (scripts/build-intellij.sh ${INTELLIJ_BUILD_ARGS:-}); then
     skip_or_fail intellij "scripts/build-intellij.sh failed (see above)"
     return
   fi
-  local zip
-  zip="$(ls -t "$INTELLIJ_DIR"/build/distributions/*.zip | awk 'NR == 1')"
+  # The zip of the version in gradle.properties (older builds stay in the same folder).
+  local version zip
+  version="$(awk -F' *= *' '$1 == "pluginVersion" { print $2 }' "$INTELLIJ_DIR/gradle.properties")"
+  zip="$(ls "$INTELLIJ_DIR"/build/distributions/*-"$version".zip)"
 
-  # 2. Unpack into every JetBrains IDE's plugin folder, replacing an older copy.
+  # 2. Unpack into the plugin folder of every JetBrains IDE the plugin supports, replacing an
+  #    older copy (including one installed with "Install Plugin from Disk...").
   if ! command -v unzip >/dev/null 2>&1; then
     skip_or_fail intellij "'unzip' is not installed. Install manually: Settings -> Plugins -> gear -> 'Install Plugin from Disk...' -> $zip"
     return
@@ -161,21 +167,41 @@ install_intellij() {
   local plugin_folder
   # (awk reads the whole listing; `head` would end the pipe early and trip pipefail.)
   plugin_folder="$(unzip -Z1 "$zip" | awk -F/ 'NR == 1 { print $1 }')"
-  local installed=0 dir
+  # Oldest supported IDE as a build number, e.g. 253 for 2025.3.
+  local since
+  since="$(awk -F' *= *' '$1 == "pluginSinceBuild" { print $2 }' "$INTELLIJ_DIR/gradle.properties")"
+  local installed=() dir name build
   while IFS= read -r dir; do
     [ -n "$dir" ] || continue
+    # "IntelliJIdea2026.2" (or ".../IntelliJIdea2026.2/plugins" on macOS/Windows) -> build 262.
+    name="$(basename "${dir%/plugins}")"
+    build="$(echo "$name" | sed -E 's/^[A-Za-z]+([0-9]{2})([0-9]{2})\.([0-9]+)$/\2\3/')"
+    if [ "$build" -lt "$since" ]; then
+      echo "--> Skipping $name: RefDex needs $since (2025.3) or later"
+      continue
+    fi
     mkdir -p "$dir"
     rm -rf "${dir:?}/$plugin_folder"
     unzip -q -o "$zip" -d "$dir"
-    echo "==> Installed into $dir/$plugin_folder"
-    installed=$((installed + 1))
+    # The daemon must be executable, or RefDex can't index anything.
+    local exe
+    for exe in "$dir/$plugin_folder"/daemon/*/refdex; do
+      [ -e "$exe" ] && chmod +x "$exe"
+    done
+    echo "==> Installed $version into $dir/$plugin_folder"
+    installed+=("$name")
   done < <(jetbrains_plugin_dirs)
 
-  if [ "$installed" -eq 0 ]; then
-    skip_or_fail intellij "no JetBrains IDE found for this user (start one once, or install manually: Settings -> Plugins -> gear -> 'Install Plugin from Disk...' -> $zip)"
+  if [ "${#installed[@]}" -eq 0 ]; then
+    skip_or_fail intellij "no JetBrains IDE $since (2025.3) or later found for this user (start one once, or install manually: Settings -> Plugins -> gear -> 'Install Plugin from Disk...' -> $zip)"
     return
   fi
-  RESULTS+=("intellij: installed $plugin_folder into $installed IDE(s) (restart them)")
+  # An IDE loads plugins only at startup.
+  # (The native launcher runs as bin/idea, a script-started IDE as com.intellij.idea.Main.)
+  if pgrep -f '/bin/(idea|pycharm|webstorm|rider|clion|goland|phpstorm|rubymine)(\.sh)?( |$)|com\.intellij\.idea\.Main' >/dev/null 2>&1; then
+    echo "==> A JetBrains IDE is running: restart it (File -> Exit, then open it again) to load RefDex $version"
+  fi
+  RESULTS+=("intellij: installed RefDex $version into ${installed[*]} (restart the IDE)")
 }
 
 # ---------------------------------------------------------------------------------------------
