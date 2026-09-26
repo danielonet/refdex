@@ -78,4 +78,4 @@ platforms="$(unzip -Z1 "$zip" | awk -F/ '$2 == "daemon" && $3 ~ /-/ && $4 ~ /^re
 echo
 echo "Built $zip ($(du -h "$zip" | cut -f1))"
 echo "  daemon executables: ${platforms:-none (every platform needs Node.js 22.13+ on PATH)}"
-echo "  install: Settings -> Plugins -> gear -> 'Install Plugin from Disk...', or scripts/build-and-install.sh intellij"
+echo "  install: Settings -> Plugins -> gear -> 'Install Plugin from Disk...', or scripts/install-intellij.sh"
