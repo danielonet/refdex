@@ -3,15 +3,90 @@
     <name>RefDex</name>
     <vendor email="danielonnet@gmail.com">Daniel Driechlinger</vendor>
     <description><![CDATA[
-    <p>A method-level code index for AI clients. RefDex parses your Python, TypeScript, Java and C# code
-    into a local SQLite index and serves it over MCP, so Claude Code, Junie and GitHub Copilot can search
-    symbols, read outlines and fetch single methods instead of opening whole files.</p>
+    <p><b>Give your AI agent a map of your code, and watch it stop reading whole files. 🗺️</b></p>
+    <p>RefDex indexes every class, method, function and property in your project and hands that index to
+    your AI agent. Instead of opening a 900-line file to find one method, the agent asks
+    <i>"where is <code>OrderService</code>?"</i>, <i>"what's in this file?"</i> or <i>"who calls this?"</i>
+    and gets a short, exact answer. Fewer tokens, sharper answers, and more room in the context window
+    for the work you actually asked for.</p>
+
+    <h3>How it saves tokens</h3>
+    <p>AI agents learn about your code by reading files. In a big project that means reading lots of code
+    that has nothing to do with the task. RefDex lets them look things up instead:</p>
     <ul>
-      <li>Indexes the project in the background and keeps the index up to date as files change.</li>
-      <li>Connects Claude Code, Junie and GitHub Copilot in one step, and copies a ready-made config for AI Assistant.</li>
-      <li>Offers its tools only where they pay off: on a small codebase, reading files is cheaper.</li>
+      <li><b>Find a class:</b> get its name, signature, file and line in one answer, instead of searching and opening candidate files.</li>
+      <li><b>Understand a file:</b> get its outline (imports and signatures, no bodies) instead of the whole file.</li>
+      <li><b>Read one method:</b> get just that method, fresh from disk, instead of the file around it.</li>
+      <li><b>Before a change:</b> get every caller, subclass and reference, each with the method it's in.</li>
+      <li><b>New to a codebase?</b> Get a repo map of the code the rest of the project depends on most, trimmed to a token budget.</li>
     </ul>
-    <p>Everything runs locally; no code leaves your machine.</p>
+    <p>For example, a 915-line file costs about <b>11,000 tokens</b> to read. Its outline costs about
+    <b>2,600</b>, and a single method about <b>280</b>. That adds up quickly over a long session:</p>
+    <ul>
+      <li><b>Lower cost, more headroom.</b> Sessions stay under the context limit longer.</li>
+      <li><b>More focused answers.</b> The context holds the code that matters, not everything near it.</li>
+      <li><b>Fewer wrong guesses.</b> Signatures, callers and base classes come from parsed code, not from skimming.</li>
+    </ul>
+    <p>And RefDex knows when to step aside. Its tool definitions cost about 1,200 tokens per request, so on
+    a small project, where reading files is cheap anyway, it keeps them switched off. It turns them on once
+    your code is big enough to benefit. The status bar always tells you which applies and why.</p>
+
+    <h3>Languages</h3>
+    <p><b>Java, C#, Python and TypeScript</b> (including TSX), with the details big projects need: Java packages,
+    C# namespaces and partial classes, Python packages and <code>src/</code> layouts, and TypeScript path aliases
+    and barrel files.</p>
+
+    <h3>AI agents</h3>
+    <ul>
+      <li><b>Claude Code:</b> connected in one click, just for you or shared with your team through <code>.mcp.json</code>.</li>
+      <li><b>Junie:</b> connected in one click through the project's <code>.junie/mcp/mcp.json</code>.</li>
+      <li><b>GitHub Copilot</b> (agent mode): connected in one click, then restart the IDE.</li>
+      <li><b>JetBrains AI Assistant:</b> RefDex copies a ready-made config for you to paste into its MCP settings.</li>
+    </ul>
+    <p>Any other agent that speaks the Model Context Protocol (MCP) can use RefDex too.</p>
+
+    <h3>Why you'll like it</h3>
+    <ul>
+      <li><b>Zero fuss.</b> Open a project and RefDex indexes it in the background, without blocking the IDE.</li>
+      <li><b>Always up to date.</b> When you save a file, only that file is parsed again, in milliseconds.</li>
+      <li><b>Never stale.</b> Code is read from disk whenever the agent asks, so it always sees what you see.</li>
+      <li><b>Private.</b> Everything runs on your machine. No code leaves it, and there's no account to create.</li>
+      <li><b>Nothing else to install.</b> The indexer comes with the plugin.</li>
+    </ul>
+
+    <h3>Getting started</h3>
+    <p><b>1. Open your project.</b> Install RefDex and open a Java, C#, Python or TypeScript project.
+    RefDex starts in the background right away.</p>
+
+    <p><b>2. Build the index.</b> Click <b>RefDex</b> in the status bar and choose <b>Reindex Project</b>.
+    A 3,000-file project takes under 30 seconds. When it's done, the status bar shows <b>RefDex: N files</b>, and
+    from then on RefDex updates the index by itself whenever you save a file. Hover over it to see the
+    symbol count and whether the AI tools are on for this project.</p>
+
+    <p><b>3. Connect your agent.</b> Choose <b>Tools | RefDex | Connect AI Client…</b> (RefDex also offers
+    this after the first index when the tools are on), then pick your agent:</p>
+    <ul>
+      <li><b>Claude Code:</b> pick <i>Claude Code</i> to keep it private to you, or <i>Claude Code (shared)</i>
+      to add it to the project's <code>.mcp.json</code> for your whole team. Then start a new Claude Code session.</li>
+      <li><b>Junie:</b> pick <i>Junie</i>. It works in the next Junie session.</li>
+      <li><b>GitHub Copilot:</b> pick <i>GitHub Copilot</i>, restart the IDE, and use Copilot Chat in agent mode.</li>
+      <li><b>AI Assistant:</b> pick <i>copy MCP config</i>, then go to <b>Settings | Tools | AI Assistant |
+      Model Context Protocol</b>, click <b>Add</b> and paste the config.</li>
+    </ul>
+
+    <p><b>4. Ask away.</b> You don't need special prompts. Your agent learns what the tools are for and
+    uses them on its own. To see it in action, try something like:</p>
+    <ul>
+      <li><i>"Give me an overview of this codebase."</i></li>
+      <li><i>"Where is the order validation, and who calls it?"</i></li>
+      <li><i>"Rename <code>OrderService.submit</code> to <code>place</code> and update every caller."</i></li>
+    </ul>
+
+    <p><b>5. Fine-tune (optional).</b> In <b>Settings | Tools | RefDex</b> you can choose which files and
+    languages to index, and when the AI tools are offered: automatically by project size, always or never.
+    On a small project, RefDex keeps the tools off until your code grows. Choose <i>Always</i> if you want them anyway.</p>
+
+    <p>That's it. Happy coding! 🚀</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
