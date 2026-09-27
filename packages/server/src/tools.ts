@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { IndexDb, IndexNotReadyError, pageRank, type ImportRow, type SymbolRow } from '@refdex/core';
+import { blastRadius, IndexDb, IndexNotReadyError, pageRank, type BlastCaller, type ImportRow, type SymbolRow, type UnlinkedCalls } from '@refdex/core';
 
 const MAX_SEARCH_RESULTS = 50;
 const DEFAULT_MAX_LINES = 250;
@@ -11,6 +11,17 @@ const MAX_LINE_LENGTH = 160;
 const MAX_CALLEES = 40;
 const MAX_EXTERNAL_CALLEES = 15;
 const DEFAULT_MAP_TOKENS = 1000;
+/** get_file_outline gives less detail beyond this (about 2,000 tokens). */
+const OUTLINE_BUDGET_CHARS = 8000;
+/** find_references lists this many lines matched by name, then counts the rest per file. */
+const MAX_NAME_MATCHES = 15;
+/** Blast radius: callers listed per level, test methods listed, and the walk's cap. */
+const MAX_BLAST_PER_LEVEL = 25;
+const MAX_BLAST_TESTS = 30;
+const MAX_BLAST_CALLERS = 2000;
+/** Callers listed with unlinked calls, besides the target. */
+const MAX_UNLINKED_CALLERS = 5;
+export const MAX_BLAST_DEPTH = 5;
 /** Rough characters per token for the repo map's budget. */
 const CHARS_PER_TOKEN = 4;
 const TYPE_KINDS = new Set(['class', 'interface', 'enum', 'type_alias']);
@@ -69,26 +80,37 @@ export class RefdexTools {
       }
       const symbols = db.fileSymbols(path);
       const imports = db.fileImports(path);
-      const out = [`${this.rel(path)} (${info.language}, indexed ${ago(info.indexed_at)})${await this.staleNote(path, info.hash)}`];
-      if (imports.length) {
-        out.push('imports:');
-        for (const i of imports) out.push(`  ${i.line}: ${this.importText(i)}`);
-      }
-      if (!symbols.length) {
-        out.push('no symbols');
-        return out.join('\n');
-      }
+      const header = `${this.rel(path)} (${info.language}, indexed ${ago(info.indexed_at)})${await this.staleNote(path, info.hash)}`;
+      if (!symbols.length) return [header, ...this.outlineImports(imports, 'full'), 'no symbols'].join('\n');
       const prefix = qualifiedPrefix(symbols);
-      out.push(prefix ? `symbols (qualified names start with "${prefix}"):` : 'symbols:');
       const depth = new Map<number, number>();
-      for (const s of symbols) {
-        const d = s.parent_id !== null ? (depth.get(s.parent_id) ?? 0) + 1 : 0;
-        depth.set(s.id, d);
-        const range = s.start_line === s.end_line ? `${s.start_line}` : `${s.start_line}-${s.end_line}`;
-        out.push(`${'  '.repeat(d + 1)}${range} ${withKind(s)}${docNote(s.doc)}`);
-      }
-      return out.join('\n');
+      for (const s of symbols) depth.set(s.id, s.parent_id !== null ? (depth.get(s.parent_id) ?? 0) + 1 : 0);
+      const range = (s: SymbolRow) => (s.start_line === s.end_line ? `${s.start_line}` : `${s.start_line}-${s.end_line}`);
+      const indent = (s: SymbolRow) => '  '.repeat(depth.get(s.id)! + 1);
+      const title = prefix ? `symbols (qualified names start with "${prefix}")` : 'symbols';
+
+      // Within the budget: every signature; else every name; else the types alone with member counts.
+      const full = [header, ...this.outlineImports(imports, 'full'), `${title}:`,
+        ...symbols.map((s) => `${indent(s)}${range(s)} ${withKind(s)}${docNote(s.doc)}`)];
+      if (full.join('\n').length <= OUTLINE_BUDGET_CHARS) return full.join('\n');
+      const names = [header, ...this.outlineImports(imports, 'short'), `${title}; names only, the file is too large for every signature:`,
+        ...symbols.map((s) => `${indent(s)}${range(s)} ${s.kind} ${s.name}`)];
+      if (names.join('\n').length <= OUTLINE_BUDGET_CHARS) return names.join('\n');
+      const members = new Map<number, number>();
+      for (const s of symbols) if (s.parent_id !== null) members.set(s.parent_id, (members.get(s.parent_id) ?? 0) + 1);
+      return [header, ...this.outlineImports(imports, 'short'),
+        `${title}; types only, the file is too large for every member (get_symbol_source on a type lists its members):`,
+        ...symbols.filter((s) => TYPE_KINDS.has(s.kind) || depth.get(s.id) === 0)
+          .map((s) => `${indent(s)}${range(s)} ${s.kind} ${s.name}${members.has(s.id) ? ` (${members.get(s.id)} members)` : ''}`),
+      ].join('\n');
     });
+  }
+
+  /** The imports section of an outline: one per line with its target, or (`short`) names on one line. */
+  private outlineImports(imports: ImportRow[], mode: 'full' | 'short'): string[] {
+    if (!imports.length) return [];
+    if (mode === 'full') return ['imports:', ...imports.map((i) => `  ${i.line}: ${this.importText(i)}`)];
+    return [`imports: ${imports.map((i) => i.spec).join(', ')}`];
   }
 
   async getSymbolSource(args: { qualified_name: string; max_lines?: number; with_callees?: boolean }): Promise<string> {
@@ -147,7 +169,7 @@ export class RefdexTools {
     return lines.join('\n');
   }
 
-  async findReferences(args: { qualified_name: string }): Promise<string> {
+  async findReferences(args: { qualified_name: string; depth?: number }): Promise<string> {
     return this.guard(async (db) => {
       const found = this.findSymbols(db, args.qualified_name);
       if (typeof found === 'string') return found;
@@ -197,6 +219,7 @@ export class RefdexTools {
       const pattern = new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`);
       const other: string[] = [];
       let otherTotal = 0;
+      const moreIn = new Map<string, number>();
       for (const path of [...candidates].sort()) {
         const lines = await linesOf(path);
         if (!lines) continue;
@@ -210,7 +233,8 @@ export class RefdexTools {
             return;
           }
           otherTotal++;
-          if (useLines.length + other.length < MAX_REFERENCES) other.push(`${this.rel(path)}:${n}: ${clip(line.trim())}`);
+          if (other.length < MAX_NAME_MATCHES) other.push(`${this.rel(path)}:${n}: ${clip(line.trim())}`);
+          else moreIn.set(path, (moreIn.get(path) ?? 0) + 1);
         });
       }
 
@@ -227,12 +251,73 @@ export class RefdexTools {
       if (otherTotal) {
         out.push(`${plural(otherTotal, 'other line')} naming "${name}" in files that import or share its module/namespace (imports, values passed around, calls on objects of unknown type; matched by name, so review):`);
         out.push(...other);
-        if (otherTotal > other.length) out.push(`… ${otherTotal - other.length} more`);
+        if (moreIn.size) {
+          const files = [...moreIn].sort((a, b) => b[1] - a[1]);
+          const shown = files.slice(0, 10).map(([p, n]) => `${this.rel(p)} (${n})`).join(', ');
+          out.push(`… ${otherTotal - other.length} more in ${plural(files.length, 'file')}: ${shown}${files.length > 10 ? ', …' : ''}`);
+        }
       } else if (!linked.size) {
         out.push('No other lines name it in the files that can see it.');
       }
+      const depth = Math.min(args.depth ?? 1, MAX_BLAST_DEPTH);
+      if (depth > 1) out.push('', ...this.blastRadiusLines(db, ids, depth));
       return out.join('\n');
     });
+  }
+
+  /**
+   * The blast radius section of find_references: callers level by level (each once, at the level
+   * it is first reached) and the tests among them.
+   */
+  private blastRadiusLines(db: IndexDb, ids: number[], depth: number): string[] {
+    const radius = blastRadius(db, ids, { depth, maxCallers: MAX_BLAST_CALLERS });
+    const tests = radius.callers.filter((c) => c.test);
+    const code = radius.callers.filter((c) => !c.test);
+    const out = [
+      `Blast radius: ${radius.callers.length} caller${radius.callers.length === 1 ? '' : 's'} up to ${depth} levels, ` +
+        `${tests.length} of them in tests${radius.truncated ? ` (stopped at ${MAX_BLAST_CALLERS}; lower depth for a complete list)` : ''}. ` +
+        'Follows linked calls, including calls through the interfaces and base methods it implements; calls the index ' +
+        'could not link (reflection, dependency injection, objects of unknown type) are not followed.',
+    ];
+    if (radius.unlinked.length) {
+      // Calls the walk couldn't follow: without them, "no callers" could read as "safe to change".
+      out.push('May be incomplete: calls the index couldn\'t link are not followed; review them (they may also be calls to other methods of the same name):');
+      const line = (u: UnlinkedCalls) => {
+        const call = `${u.example.qualifier ? `${clip(u.example.qualifier, 60)}.` : ''}${u.symbol.name}(…)`;
+        const one = u.count === 1;
+        const what = u.target ? (one ? 'unlinked call' : 'unlinked calls') : (one ? 'call on a call result' : 'calls on call results');
+        return `  ${u.symbol.qualified_name}: ${u.count} ${what}, e.g. ${this.rel(u.example.path)}:${u.example.line} ${call}`;
+      };
+      const callers = radius.unlinked.filter((u) => !u.target).sort((a, b) => b.count - a.count);
+      for (const u of radius.unlinked.filter((u) => u.target)) out.push(line(u));
+      for (const u of callers.slice(0, MAX_UNLINKED_CALLERS)) out.push(line(u));
+      if (callers.length > MAX_UNLINKED_CALLERS) out.push(`  … ${callers.length - MAX_UNLINKED_CALLERS} more callers with unlinked calls`);
+    }
+    const name = (c: BlastCaller) => c.caller?.qualified_name ?? '(module level)';
+    for (let level = 1; level <= depth; level++) {
+      const here = code.filter((c) => c.level === level);
+      if (!here.length) continue;
+      out.push(`Level ${level}${level === 1 ? ' (direct callers)' : ''}:`);
+      for (const c of here.slice(0, MAX_BLAST_PER_LEVEL)) out.push(`  ${name(c)}  ${this.rel(c.path)}:${c.line}`);
+      if (here.length > MAX_BLAST_PER_LEVEL) out.push(`  … ${here.length - MAX_BLAST_PER_LEVEL} more`);
+    }
+    if (!code.length) out.push('No callers outside tests.');
+    if (tests.length) {
+      out.push('Tests that reach it (through the calls above; static, not runtime coverage):');
+      const byFile = new Map<string, BlastCaller[]>();
+      for (const t of tests) byFile.set(t.path, [...(byFile.get(t.path) ?? []), t]);
+      let shown = 0;
+      for (const [path, inFile] of byFile) {
+        if (shown >= MAX_BLAST_TESTS) break;
+        const names = inFile.slice(0, MAX_BLAST_TESTS - shown).map((t) => `${t.caller?.name ?? `line ${t.line}`} (L${t.level})`);
+        shown += names.length;
+        out.push(`  ${this.rel(path)}: ${names.join(', ')}${inFile.length > names.length ? ', …' : ''}`);
+      }
+      if (tests.length > shown) out.push(`  … ${tests.length - shown} more`);
+    } else {
+      out.push(`No tests reach it within ${depth} levels.`);
+    }
+    return out;
   }
 
   async getRepoMap(args: { token_budget?: number; path?: string }): Promise<string> {
@@ -353,7 +438,7 @@ export class RefdexTools {
     } catch (e) {
       if (e instanceof IndexNotReadyError) {
         this.close();
-        return `RefDex: ${e.message}. Build it with "Generate Index" in the RefDex VS Code panel or \`refdex index --root ${this.root}\`, then retry. Until then, read files directly.`;
+        return `RefDex: ${e.message}. Build it with "Generate Index" in VS Code's RefDex panel, "Reindex Project" in a JetBrains IDE's RefDex menu, or \`refdex index --root ${this.root}\`, then retry. Until then, read files directly.`;
       }
       if (e instanceof UserError) return e.message;
       throw e;

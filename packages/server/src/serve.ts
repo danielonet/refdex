@@ -92,9 +92,10 @@ export async function serve(root: string, dbPath: string, opts: ServeOptions): P
     );
     await watcher.start();
   };
-  if (db.counts().files > 0) {
+  if (db.counts().files > 0 || db.replacedOutdated) {
     await startWatching();
-    // Catch up on changes made while the daemon was not running (unchanged files are skipped).
+    // Catch up on changes made while the daemon was not running (unchanged files are skipped), or
+    // rebuild an index a RefDex update replaced: the workspace was indexed, so keep it that way.
     reindex(true).catch(() => {});
   }
 

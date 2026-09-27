@@ -27,13 +27,24 @@ builds their executables.
 ## Development
 
 Requires JDK 21 and Node 22.18+ (for the daemon build). The Gradle wrapper downloads Gradle and the
-IntelliJ Platform SDK.
+IntelliJ Platform SDK (about 1.5 GB on the first build).
+
+From the repository root:
+
+```sh
+scripts/build-intellij.sh [--test] [--verify]   # build/distributions/refdex-intellij-<version>.zip
+scripts/install-intellij.sh [--test]            # build, then install into every local JetBrains IDE 2025.3+
+```
+
+Or with Gradle in this folder:
 
 ```sh
 ./gradlew test          # builds and stages the daemon, then runs the unit and daemon tests
 ./gradlew buildPlugin   # build/distributions/refdex-intellij-<version>.zip
 ./gradlew runIde        # a sandbox IDE with the plugin installed
-./gradlew verifyPlugin  # checks compatibility with the IDEs the plugin supports
+./gradlew verifyPlugin -PverifyIde=<folder of an installed IDE>   # JetBrains' Plugin Verifier
 ```
 
-`-PskipDaemonBuild` skips `npm run build:sea` and stages whatever `packages/server/dist` holds.
+- `-PskipDaemonBuild` skips `npm run build:sea` and stages whatever `packages/server/dist` holds.
+- `verifyPlugin` without `-PverifyIde` checks against JetBrains' recommended IDE versions, which it
+  downloads first (several GB). It needs a lot of memory; close other IDEs on a machine with little RAM.

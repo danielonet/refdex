@@ -46,8 +46,11 @@ interface FileScope {
   names: Map<string, SymbolRef>;
   /** Local name or dotted path -> the module file it stands for (TS `* as ns`, Python module imports). */
   modules: Map<string, { id: number; path: string }>;
-  /** Types whose members are in scope unqualified (Java `import static`, C# `using static`). */
-  staticTypes: number[];
+  /**
+   * Types whose members are in scope unqualified (Java `import static`, C# `using static`); `member`
+   * limits that to one name (Java `import static a.Util.x`).
+   */
+  staticTypes: { type: number; member?: string }[];
   /** Python `from m import *`. */
   wildcardFiles: Set<number>;
   /** Files whose members count as visible for `obj.member` with an unknown receiver. */
@@ -59,7 +62,8 @@ interface FileScope {
 /**
  * Links edges (uses of names) to the symbols they refer to. Resolution is by scope, not by type
  * inference: enclosing declarations, then imports, then the package/namespace. `obj.m()` with an
- * unknown receiver resolves only when exactly one visible type declares `m`. Anything ambiguous
+ * unknown receiver resolves only when exactly one visible type declares `m`, or when all of them
+ * are one type hierarchy (then to the top declaration, as a call through it). Anything ambiguous
  * or outside the index stays unresolved; precision matters more than recall here, since
  * find_references and the repo map are built on these edges.
  */
@@ -137,7 +141,31 @@ export class ReferenceResolver {
     if (NAMESPACE_LANGUAGES.has(scope.language)) {
       for (const ns of scope.namespaces) for (const c of this.inNamespace(row.name, ns)) if (c.language === scope.language) visible.add(c);
     }
-    return pick([...visible].filter((c) => kinds.has(c.kind) && c.parent_id !== null && TYPES.has(this.ref(c.parent_id)?.kind as SymbolKind)));
+    return this.pickTopDeclaration([...visible].filter((c) => kinds.has(c.kind) && c.parent_id !== null && TYPES.has(this.ref(c.parent_id)?.kind as SymbolKind)));
+  }
+
+  /**
+   * The one member several types declare, when they are all the same member in one type hierarchy:
+   * an interface or base declaration and its overrides. A call on an object of unknown type goes
+   * to that top declaration (`store.save()`, with `Store.save` and `DiskStore.save` visible, links
+   * to `Store.save`), as a call through the interface would.
+   */
+  private pickTopDeclaration(candidates: SymbolRef[]): number | undefined {
+    const one = pick(candidates);
+    if (one !== undefined || candidates.length < 2) return one;
+    for (const top of candidates) {
+      const topType = this.typeParts(top.parent_id!)[0];
+      const all = candidates.every((c) =>
+        c.qualified_name === top.qualified_name || this.inherits(this.typeParts(c.parent_id!)[0], topType));
+      if (all) return top.id;
+    }
+    return undefined;
+  }
+
+  /** Whether a type extends or implements `ancestor`, at any distance. */
+  private inherits(typeId: number, ancestor: number, depth = 0): boolean {
+    if (depth >= MAX_BASE_DEPTH) return false;
+    return this.baseTypes(typeId).some((b) => this.typeParts(b)[0] === ancestor || this.inherits(b, ancestor, depth + 1));
   }
 
   /** An unqualified name: enclosing declarations, imports, then the package/namespace. */
@@ -162,7 +190,8 @@ export class ReferenceResolver {
     const imported = scope.names.get(name);
     if (imported && kinds.has(imported.kind)) return imported.id;
     for (const t of scope.staticTypes) {
-      const found = this.member(t, name, kinds);
+      if (t.member !== undefined && t.member !== name) continue;
+      const found = this.member(t.type, name, kinds);
       if (found !== undefined) return found;
     }
     if (scope.wildcardFiles.size) {
@@ -278,7 +307,12 @@ export class ReferenceResolver {
         case 'static':
         case 'wildcard':
           // Java `import static a.Util.x` / `import a.Outer.*`, C# `using static A.Util`: members of a type.
-          if (type) scope.staticTypes.push(type.id);
+          if (!type) break;
+          // Java's `import static a.Util.x` imports one member, unlike `import static a.Util.*` (a
+          // wildcard) or C#'s `using static A.Util`. The spec names the member after the type.
+          scope.staticTypes.push(imp.kind === 'static' && language === 'java' && imp.spec !== type.qualified_name
+            ? { type: type.id, member: imp.spec.slice(imp.spec.lastIndexOf('.') + 1) }
+            : { type: type.id });
           break;
         case 'alias':
           if (type && imp.alias) scope.names.set(imp.alias, type);

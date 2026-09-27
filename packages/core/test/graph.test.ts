@@ -212,3 +212,25 @@ describe('pageRank', () => {
     assert.equal(pageRank([], []).size, 0);
   });
 });
+
+describe('java static imports', () => {
+  it('a single-member static import makes only that member visible', async () => {
+    const ix = await indexSources({
+      'src/app/Lists.java': 'package app;\npublic class Lists { public static void partition() {} public static void other() {} }\n',
+      'src/app/Iterables.java': 'package app;\npublic class Iterables { public static void partition() {} public static void elementsEqual() {} }\n',
+      'src/app/Use.java': `package app;
+import static app.Iterables.elementsEqual;
+import static app.Lists.partition;
+public class Use { void run() { elementsEqual(); partition(); } }
+`,
+    });
+    try {
+      const edges = ix.edges();
+      assert.ok(edges.includes('app.Use.run -calls-> app.Lists.partition'), edges.join('\n'));
+      assert.ok(edges.includes('app.Use.run -calls-> app.Iterables.elementsEqual'), edges.join('\n'));
+    } finally {
+      ix.db.close();
+      await ix.cleanup();
+    }
+  });
+});

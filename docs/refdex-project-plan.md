@@ -208,7 +208,7 @@ Phase 3 notes (2026-09-24):
 - **Usage log:** the MCP server appends one JSON line per tool call (client name and version from `initialize`, tool, ms, characters returned) to `mcp-usage.jsonl` beside the index, rotated at 2 MB. The extension watches it: the status report shows calls per client and approximate tokens returned, and the About view shows each client's state. This log also feeds the Phase 5 token measurement.
 - **Settings:** `refdex.include` (gitignore-style allow list) and `refdex.languages` join `refdex.exclude` and `refdex.watch`; any change restarts the daemon.
 - **Deviation:** the plan's `client_usage` table became a JSONL file, because the MCP server's database connection is read-only.
-- **Open:** Copilot's `clientInfo` name is assumed to be "Visual Studio Code" (VS Code's product name) until a real agent-mode session confirms it.
+- **Open:** Copilot's `clientInfo` name in VS Code is assumed to be "Visual Studio Code" (VS Code's product name) until a real agent-mode session confirms it. In JetBrains IDEs it is "Copilot MCP Gateway" (seen in Phase 6).
 
 ### Phase 4: Graph and ranking
 
@@ -250,7 +250,7 @@ Phase 4 notes (2026-09-24):
 
 Tools only where they pay off (2026-09-25):
 
-- **Fixed cost:** the five tool definitions and the instructions are about 4,700 characters, roughly 1,200 tokens, sent with every client request. On a small codebase, reading files costs less.
+- **Fixed cost:** the five tool definitions and the instructions are about 4,800 characters, roughly 1,200 tokens, sent with every client request (measured 2026-09-27, after trimming the descriptions back from about 1,500). On a small codebase, reading files costs less.
 - **Gate:** `refdex mcp --tools auto|always|never --min-tokens N` (or `REFDEX_TOOLS`/`REFDEX_MIN_TOKENS`). In `auto`, the tools are offered when the indexed source reaches N estimated tokens (4 characters each, summed from the new `files.chars` column, schema 5). The default is 100,000.
   - Below the threshold the server lists no tools and sends a one-line instruction instead of the full one.
   - It re-checks every minute and enables the tools once the codebase is big enough. The client is told the tool list changed.
@@ -289,6 +289,15 @@ Phase 6 notes (2026-09-26):
 - **Verified:** on guava (about 7.3 million tokens of code), Copilot for JetBrains connects as client "Copilot MCP Gateway" with the tools on. Copilot offers MCP tools only in agent mode.
 - **Deviation:** the plugin finds its own folder through its `PluginAwareClassLoader`. `PluginManagerCore.getPlugin` and `PluginManager.getPluginByClass` are internal API, and a class's code source location is null inside the IDE.
 - **Open:** daemon executables for macOS and Windows (CI); replacing `StatusBarWidget.getPresentation()`, which the 2026.3 EAP deprecates; and indexing a project automatically the first time it opens, instead of waiting for "Reindex Project".
+
+### Blast radius and review fixes (2026-09-27)
+
+- **Blast radius:** `find_references` takes `depth` (2–5). It walks resolved calls backwards level by level (`blastRadius` in `packages/core/src/blast.ts`), also starting from the methods each caller overrides or implements, and lists the tests among the callers. Tests are recognized by path conventions (`isTestPath`), so this is static reachability, not runtime coverage. The VS Code and IntelliJ views are still open.
+- **Resolver:** a call on an object of unknown type now links to the top declaration when every visible candidate is one type hierarchy (`store.save()` with `Store.save` and `DiskStore.save` visible links to `Store.save`): about 5,500 more linked calls in Guava. Java's `import static a.Util.x` now makes only `x` visible; before, it made every member of `Util` visible, which linked Guava's `partition(…)` calls in `ListsTest` to `Iterables.partition` (about 960 wrong links).
+- **Schema 6:** the resolver changes bumped the schema version, which makes the daemon drop old indexes. It now also re-indexes right away when it replaced an old version's index; before, the index stayed empty until the user asked.
+- **Leaner answers:** `get_file_outline` falls back to names only, then to types with member counts, beyond about 2,000 tokens (Guava's `LocalCache.java`: 15,900 → 1,300 tokens). `find_references` lists 15 lines matched by name, then counts the rest per file (`recordStats`: 2,850 → 820 tokens).
+- **Token review, measured on Guava:** a method from `get_symbol_source` costs 140–1,500 tokens against 13,000–15,000 for reading its file; an outline 1,100–1,300 against 13,000–38,000. So one lookup that replaces a whole-file read pays for about 10 requests of fixed cost. Whether agents do that in practice is not shown yet: in the usage logs on the development machine, Claude Code connected to Guava with the tools on and made no calls. The Phase 5 token comparison (same tasks with and without RefDex) is the open question that decides the threshold and the product claim.
+- **Open:** calls on the result of another call (`Joiner.on(",").join(…)`, builder chains) aren't linked: 18% of Guava's calls, 11% naming a method in Guava itself, so linking them could add up to 29% more linked calls. Resolving them needs return types from signatures. Until then the blast radius reports them: every unlinked call named like the target, and calls on call results named like a caller it walked through (all unlinked calls there would mostly be library methods such as `Map.put`). For `CacheBuilder.recordStats`, an empty blast radius now says "78 unlinked calls, e.g. `CacheBuilder.newBuilder().recordStats(…)`".
 
 ## Testing and success metrics
 

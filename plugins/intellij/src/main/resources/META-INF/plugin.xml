@@ -18,10 +18,11 @@
       <li><b>Understand a file:</b> get its outline (imports and signatures, no bodies) instead of the whole file.</li>
       <li><b>Read one method:</b> get just that method, fresh from disk, instead of the file around it.</li>
       <li><b>Before a change:</b> get every caller, subclass and reference, each with the method it's in.</li>
+      <li><b>Blast radius:</b> follow callers of callers a few levels up, and see which tests reach the code you're about to change.</li>
       <li><b>New to a codebase?</b> Get a repo map of the code the rest of the project depends on most, trimmed to a token budget.</li>
     </ul>
-    <p>For example, a 915-line file costs about <b>11,000 tokens</b> to read. Its outline costs about
-    <b>2,600</b>, and a single method about <b>280</b>. That adds up quickly over a long session:</p>
+    <p>For example, Guava's 1,148-line <code>CacheBuilder.java</code> costs about <b>13,200 tokens</b> to read.
+    Its outline costs about <b>1,100</b>, and a single method about <b>140</b>. That adds up quickly over a long session:</p>
     <ul>
       <li><b>Lower cost, more headroom.</b> Sessions stay under the context limit longer.</li>
       <li><b>More focused answers.</b> The context holds the code that matters, not everything near it.</li>
@@ -47,44 +48,12 @@
 
     <h3>Why you'll like it</h3>
     <ul>
-      <li><b>Zero fuss.</b> Open a project and RefDex indexes it in the background, without blocking the IDE.</li>
+      <li><b>Zero fuss.</b> Click <b>Reindex Project</b> once and RefDex indexes the project in the background, without blocking the IDE.</li>
       <li><b>Always up to date.</b> When you save a file, only that file is parsed again, in milliseconds.</li>
       <li><b>Never stale.</b> Code is read from disk whenever the agent asks, so it always sees what you see.</li>
       <li><b>Private.</b> Everything runs on your machine. No code leaves it, and there's no account to create.</li>
       <li><b>Nothing else to install on Linux.</b> The indexer comes with the plugin. On Windows and macOS, RefDex runs it with your Node.js 22.13 or later for now; built-in support is on its way.</li>
     </ul>
-
-    <h3>Getting started</h3>
-    <p><b>1. Open your project.</b> Install RefDex and open a Java, C#, Python or TypeScript project.
-    RefDex starts in the background right away.</p>
-
-    <p><b>2. Build the index.</b> Click <b>RefDex</b> in the status bar and choose <b>Reindex Project</b>.
-    A 3,000-file project takes under 30 seconds. When it's done, the status bar shows <b>RefDex: N files</b>, and
-    from then on RefDex updates the index by itself whenever you save a file. Hover over it to see the
-    symbol count and whether the AI tools are on for this project.</p>
-
-    <p><b>3. Connect your agent.</b> Choose <b>Tools | RefDex | Connect AI Client…</b> (RefDex also offers
-    this after the first index when the tools are on), then pick your agent:</p>
-    <ul>
-      <li><b>Claude Code:</b> pick <i>Claude Code</i> to keep it private to you, or <i>Claude Code (shared)</i>
-      to add it to the project's <code>.mcp.json</code> for your whole team. Then start a new Claude Code session.</li>
-      <li><b>Junie:</b> pick <i>Junie</i>. It works in the next Junie session.</li>
-      <li><b>GitHub Copilot:</b> pick <i>GitHub Copilot</i>, restart the IDE, and use Copilot Chat in agent mode.</li>
-      <li><b>AI Assistant:</b> pick <i>copy MCP config</i>, then go to <b>Settings | Tools | AI Assistant |
-      Model Context Protocol</b>, click <b>Add</b> and paste the config.</li>
-    </ul>
-
-    <p><b>4. Ask away.</b> You don't need special prompts. Your agent learns what the tools are for and
-    uses them on its own. To see it in action, try something like:</p>
-    <ul>
-      <li><i>"Give me an overview of this codebase."</i></li>
-      <li><i>"Where is the order validation, and who calls it?"</i></li>
-      <li><i>"Rename <code>OrderService.submit</code> to <code>place</code> and update every caller."</i></li>
-    </ul>
-
-    <p><b>5. Fine-tune (optional).</b> In <b>Settings | Tools | RefDex</b> you can choose which files and
-    languages to index, and when the AI tools are offered: automatically by project size, always or never.
-    On a small project, RefDex keeps the tools off until your code grows. Choose <i>Always</i> if you want them anyway.</p>
 
     <p>That's it. Happy coding! 🚀</p>
     ]]></description>

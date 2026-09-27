@@ -7,8 +7,11 @@ import type { EdgeType, ExtractedSymbol, ImportDecl, ImportedName, ParsedFile, S
 // ExperimentalWarning before this module loads it.
 const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
 
-/** Bump when the schema changes. The index is a cache, so an old one is simply rebuilt. */
-const SCHEMA_VERSION = 5;
+/**
+ * Bump when the schema or reference resolution changes. The index is a cache, so an old one is
+ * simply rebuilt. 6: calls through an interface or base method, and single-member static imports.
+ */
+const SCHEMA_VERSION = 6;
 
 // Few indexes on edges: every save rewrites a file's edges. edges_to is partial because most edges
 // start (and many stay) unresolved; lookups by target imply NOT NULL, so SQLite still uses it.
@@ -165,6 +168,14 @@ export interface UseRow {
   from_qualified_name: string | null;
 }
 
+/** A resolved call into a symbol: the calling symbol (null for module-level code) and where. */
+export interface CallerRow {
+  caller: SymbolRow | null;
+  path: string;
+  line: number;
+  callee_id: number;
+}
+
 /** The slim symbol row reference resolution works with. */
 export interface SymbolRef {
   id: number;
@@ -197,6 +208,11 @@ const IMPORT_COLUMNS = `i.id, i.file_id, f.path, f.language, i.kind, i.spec, i.n
   i.resolved_file_id, rf.path AS resolved_path, i.resolved_namespace, i.resolved_symbol_id`;
 
 export class IndexDb {
+  /**
+   * The database held an index from another RefDex version, which was dropped: the workspace was
+   * indexed before, so the caller should index it again rather than wait to be asked.
+   */
+  readonly replacedOutdated: boolean = false;
   readonly db: Database;
   private readonly statements = new Map<string, StatementSync>();
 
@@ -217,6 +233,7 @@ export class IndexDb {
     }
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;');
     if (version !== SCHEMA_VERSION) this.reset();
+    this.replacedOutdated = version !== 0 && version !== SCHEMA_VERSION;
     // In case a first index was interrupted while its edge indexes were dropped.
     this.createEdgeIndexes();
   }
@@ -514,6 +531,38 @@ export class IndexDb {
        WHERE e.to_symbol_id IN (SELECT value FROM json_each(?))
        ORDER BY f.path, e.line`,
     ).all(JSON.stringify(symbolIds)) as unknown as UseRow[];
+  }
+
+  /**
+   * Calls named `name` in the given files that the index could not link: how many, and the first.
+   * `onCallResults`: only calls on the result of another call (`a.b().name()`).
+   */
+  unlinkedCalls(name: string, fileIds: number[], onCallResults = false): { count: number; first?: { path: string; line: number; qualifier: string | null } } {
+    const where = `e.type = 'calls' AND e.to_symbol_id IS NULL AND e.name = ?1 AND e.file_id IN (SELECT value FROM json_each(?2))` +
+      (onCallResults ? ` AND e.qualifier LIKE '%(%'` : '');
+    const args = [name, JSON.stringify(fileIds)] as const;
+    const { n } = this.stmt(`SELECT count(*) AS n FROM edges e WHERE ${where}`).get(...args) as { n: number };
+    if (!n) return { count: 0 };
+    const first = this.stmt(`SELECT f.path, e.line, e.qualifier FROM edges e JOIN files f ON f.id = e.file_id WHERE ${where} ORDER BY f.path, e.line LIMIT 1`)
+      .get(...args) as { path: string; line: number; qualifier: string | null };
+    return { count: n, first };
+  }
+
+  /** Resolved calls into the given symbols, in path and line order. */
+  callers(symbolIds: number[]): CallerRow[] {
+    const rows = this.stmt(
+      `SELECT ${SYMBOL_COLUMNS}, ef.path AS call_path, e.line AS call_line, e.to_symbol_id AS callee_id
+       FROM edges e JOIN files ef ON ef.id = e.file_id
+       LEFT JOIN symbols s ON s.id = e.from_symbol_id LEFT JOIN files f ON f.id = s.file_id
+       WHERE e.type = 'calls' AND e.to_symbol_id IN (SELECT value FROM json_each(?))
+       ORDER BY ef.path, e.line`,
+    ).all(JSON.stringify(symbolIds)) as unknown as (SymbolRow & { call_path: string; call_line: number; callee_id: number })[];
+    return rows.map(({ call_path, call_line, callee_id, ...caller }) => ({
+      caller: caller.id === null ? null : caller,
+      path: call_path,
+      line: call_line,
+      callee_id,
+    }));
   }
 
   /**

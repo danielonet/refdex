@@ -6,7 +6,8 @@ export type { ImportResolution, LanguageAdapter, ResolveContext } from './adapte
 export { ADAPTERS, adapterFor } from './adapters/index.ts';
 export { IGNORED_DIRS, isConfigFile, Workspace, type WorkspaceOptions } from './workspace.ts';
 export {
-  BROWSE_TABLES, IndexDb, IndexNotReadyError, type BrowseTable, type EdgeRow, type ImportRow, type IndexStats, type SymbolRef, type SymbolRow, type UseRow,
+  BROWSE_TABLES, IndexDb, IndexNotReadyError, type BrowseTable, type CallerRow, type EdgeRow, type ImportRow, type IndexStats, type SymbolRef, type SymbolRow, type UseRow,
 } from './db.ts';
 export { Indexer, type IndexSummary } from './indexer.ts';
 export { pageRank, type WeightedEdge } from './rank.ts';
+export { blastRadius, isTestPath, type BlastCaller, type BlastRadius, type UnlinkedCalls } from './blast.ts';

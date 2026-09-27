@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, cp } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { IndexDb, Indexer, TreeSitter } from '@refdex/core';
 import { RefdexTools } from '../src/tools.ts';
@@ -9,10 +9,20 @@ import { RefdexTools } from '../src/tools.ts';
 const FIXTURES = join(import.meta.dirname, '..', '..', 'core', 'test', 'fixtures');
 let treeSitter: Promise<TreeSitter> | undefined;
 
-/** Copies a fixture, indexes it into a real database file and opens the tools read-only on it. */
-async function toolsFor(fixture: string): Promise<{ tools: RefdexTools; root: string; cleanup: () => Promise<void> }> {
-  const root = await mkdtemp(join(tmpdir(), `refdex-tools-${fixture}-`));
-  await cp(join(FIXTURES, fixture), root, { recursive: true });
+/**
+ * Copies a fixture (or writes `files`, relative path -> content), indexes it into a real database
+ * file and opens the tools read-only on it.
+ */
+async function toolsFor(fixture: string | Record<string, string>): Promise<{ tools: RefdexTools; root: string; cleanup: () => Promise<void> }> {
+  const root = await mkdtemp(join(tmpdir(), 'refdex-tools-'));
+  if (typeof fixture === 'string') {
+    await cp(join(FIXTURES, fixture), root, { recursive: true });
+  } else {
+    for (const [rel, content] of Object.entries(fixture)) {
+      await mkdir(dirname(join(root, rel)), { recursive: true });
+      await writeFile(join(root, rel), content);
+    }
+  }
   const dbPath = join(root, '.refdex.db');
   const db = new IndexDb(dbPath);
   await new Indexer(db, await (treeSitter ??= TreeSitter.create()), root).syncAll();
@@ -144,6 +154,67 @@ describe('MCP tools: python, java, csharp', () => {
       const refs = await t.tools.findReferences({ qualified_name: 'Acme.Domain.Customer' });
       assert.match(refs, /App\/Services\/CustomerService\.cs:\d+: .*new Customer/);
       assert.doesNotMatch(refs, /Lib\/Other\.cs/);
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it('find_references with depth adds the blast radius: callers through the interface, then tests', async () => {
+    const t = await toolsFor({
+      'src/main/java/app/Store.java': 'package app;\npublic interface Store { void save(String key); }\n',
+      'src/main/java/app/DiskStore.java': 'package app;\npublic class DiskStore implements Store {\n  public void save(String key) {}\n}\n',
+      'src/main/java/app/Service.java':
+        'package app;\npublic class Service {\n  private final Store store;\n  public Service(Store store) { this.store = store; }\n  public void put(String key) { store.save(key); }\n}\n',
+      'src/main/java/app/Api.java':
+        'package app;\npublic class Api {\n  private Service service;\n  public void handle() { service.put("x"); }\n  public void fresh() { make().put("y"); }\n  private Service make() { return service; }\n}\n',
+      'src/test/java/app/ServiceTest.java':
+        'package app;\npublic class ServiceTest {\n  void testPut() {\n    Service service = new Service(new DiskStore());\n    service.put("k");\n  }\n}\n',
+    });
+    try {
+      const plain = await t.tools.findReferences({ qualified_name: 'app.DiskStore.save' });
+      assert.doesNotMatch(plain, /Blast radius/);
+      const out = await t.tools.findReferences({ qualified_name: 'app.DiskStore.save', depth: 3 });
+      assert.match(out, /Blast radius: 3 callers up to 3 levels, 1 of them in tests\./);
+      assert.match(out, /Level 1 \(direct callers\):\n {2}app\.Service\.put {2}src\/main\/java\/app\/Service\.java:5/);
+      assert.match(out, /Level 2:\n {2}app\.Api\.handle {2}src\/main\/java\/app\/Api\.java:4/);
+      assert.match(out, /Tests that reach it[^\n]*\n {2}src\/test\/java\/app\/ServiceTest\.java: testPut \(L2\)/);
+      // Api.fresh calls Service.put on a call result: the walk can't follow it and says so.
+      assert.match(out, /May be incomplete[^\n]*\n {2}app\.Service\.put: 1 call on a call result, e\.g\. src\/main\/java\/app\/Api\.java:5 make\(\)\.put\(…\)\nLevel 1/);
+      const chained = await t.tools.findReferences({ qualified_name: 'app.Service.put', depth: 2 });
+      assert.match(chained, /May be incomplete: calls the index couldn't link are not followed[^\n]*\n {2}app\.Service\.put: 1 unlinked call, e\.g\. src\/main\/java\/app\/Api\.java:5 make\(\)\.put\(…\)/);
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it('get_file_outline gives less detail for large files, and find_references counts extra name matches per file', async () => {
+    // One class with many long signatures: too long in full, fine as names.
+    const params = Array.from({ length: 12 }, (_, i) => `argument${i}: string`).join(', ');
+    const methods = Array.from({ length: 60 }, (_, i) => `  method${i}(${params}): void {}`).join('\n');
+    // Many classes with many members: too long even as names.
+    const classes = Array.from({ length: 40 }, (_, c) =>
+      `export class Type${c} {\n${Array.from({ length: 40 }, (_, m) => `  member${m}(): void {}`).join('\n')}\n}`).join('\n');
+    const uses = Array.from({ length: 30 }, (_, i) => `export const use${i} = 'target';`).join('\n');
+    const t = await toolsFor({
+      'tsconfig.json': '{}',
+      'src/wide.ts': `export class Wide {\n${methods}\n}\n`,
+      'src/many.ts': `${classes}\n`,
+      'src/target.ts': 'export function target(): void {}\n',
+      'src/a.ts': `import { target } from './target';\n${uses}\n`,
+      'src/b.ts': `import { target } from './target';\n${uses}\n`,
+    });
+    try {
+      const wide = await t.tools.getFileOutline({ path: 'src/wide.ts' });
+      assert.match(wide, /names only, the file is too large for every signature:/);
+      assert.match(wide, /\n {4}2 method method0\n/);
+      assert.doesNotMatch(wide, /argument0/);
+      const many = await t.tools.getFileOutline({ path: 'src/many.ts' });
+      assert.match(many, /types only, the file is too large for every member/);
+      assert.match(many, /\n {2}1-42 class Type0 \(40 members\)\n/);
+      assert.doesNotMatch(many, /member0/);
+      const refs = await t.tools.findReferences({ qualified_name: 'src/target:target' });
+      assert.equal(refs.split('\n').filter((l) => /^src\/[ab]\.ts:\d+: /.test(l)).length, 15);
+      assert.match(refs, /… 47 more in 2 files: src\/[ab]\.ts \(\d+\), src\/[ab]\.ts \(\d+\)/);
     } finally {
       await t.cleanup();
     }

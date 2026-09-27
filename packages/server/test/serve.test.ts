@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -95,5 +95,28 @@ describe('refdex serve', () => {
     event = await indexed;
     assert.equal(event.summary.removed, 1);
     assert.equal((await client.request('search', { query: 'Fresh' })).length, 0);
+  });
+});
+
+describe('refdex serve after a RefDex update', () => {
+  it('rebuilds an index an older version made, without being asked', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'refdex-serve-old-'));
+    await cp(FIXTURE, root, { recursive: true });
+    const dbPath = join(root, '.refdex', 'index.db');
+    await mkdir(join(root, '.refdex'));
+    // An index from an older schema version.
+    const { DatabaseSync } = await import('node:sqlite');
+    const old = new DatabaseSync(dbPath);
+    old.exec('CREATE TABLE files (id INTEGER PRIMARY KEY); PRAGMA user_version = 1;');
+    old.close();
+    const client = new Client(root, dbPath);
+    try {
+      const indexed = await client.nextEvent((e) => e.event === 'indexed', 60_000);
+      assert.ok(indexed.stats.files > 0, 'the workspace is indexed again');
+      assert.equal((await client.request('info')).watching, true);
+    } finally {
+      client.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

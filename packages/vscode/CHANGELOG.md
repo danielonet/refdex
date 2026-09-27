@@ -4,6 +4,21 @@ All notable changes to RefDex are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- **Blast radius for AI assistants.** `find_references` takes a `depth` (2–5): callers of the callers up to that many levels, including calls through the interfaces and base methods a method implements, and the tests that reach it. When calls the index couldn't link may lead to the method (for example `CacheBuilder.newBuilder().recordStats()`), the answer says the blast radius may be incomplete and shows one.
+
+### Changed
+
+- **Smaller answers.** File outlines of very large files show names only, or only their types, instead of every signature, and `find_references` lists at most 15 lines that only match by name, then counts the rest per file.
+- **Smaller tool definitions**, back to about 1,200 tokens per AI request.
+
+### Fixed
+
+- Calls through an interface (`store.save()` where both `Store` and `DiskStore` declare `save`) are now linked to the interface method, so `find_references` finds them.
+- In Java, `import static a.Util.x` no longer makes every member of `Util` visible, which could link calls to the wrong method.
+- The index is rebuilt once after this update, automatically. The "no index" message also explains what to do in JetBrains IDEs.
+
 ## [0.1.3] - 2026-09-25
 
 ### Added

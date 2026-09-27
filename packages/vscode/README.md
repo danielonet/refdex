@@ -31,9 +31,10 @@ Every token an assistant spends reading irrelevant code is a token it can't spen
 | To understand a file | Read the whole file | `get_file_outline`: imports and signatures, no bodies |
 | One method | Read the file it's in | `get_symbol_source`: just that method, read from disk |
 | Its callers, before a change | Text search and reading the matches | `find_references`: each use, with the method it's in |
+| The blast radius of a change | Following callers of callers by hand | `find_references` with `depth`: indirect callers level by level, and the tests that reach it |
 | To get oriented in a new codebase | Browse folders and read files | `get_repo_map`: the most-used code, trimmed to a token budget |
 
-For example, RefDex's own database module is 915 lines, about **11,000 tokens** to read whole. Its outline costs about **2,600 tokens**, and one method about **280**. (Token counts are estimated at 4 characters per token.)
+For example, Guava's `CacheBuilder.java` is 1,148 lines, about **13,200 tokens** to read whole. Its outline costs about **1,100 tokens**, and one method about **140**. Outlines of very large files stay small: Guava's 5,000-line `LocalCache.java` (about 38,000 tokens) outlines in about 1,300. (Token counts are estimated at 4 characters per token.)
 
 Smaller answers mean:
 
@@ -72,7 +73,7 @@ That's it. The assistant is told what the tools are for and uses them without be
 | `search_symbols` | "Where is X?": classes, functions, methods, properties and fields by name or prefix, filtered by kind or language |
 | `get_file_outline` | "What's in this file?": imports (and where they resolve), plus every signature and line range, nested by class |
 | `get_symbol_source` | "Show me this code": one symbol's source from disk, every overload and partial-class part; `with_callees` adds what it calls |
-| `find_references` | "Who uses this?": calls, subclasses, implementations and type references, each with the calling method, plus imports |
+| `find_references` | "Who uses this?": calls, subclasses, implementations and type references, each with the calling method, plus imports. With `depth` (2–5), the blast radius: callers of the callers up to that many levels, including calls through the interfaces and base methods it implements, and the tests that reach it |
 
 Every tool is read-only, and each answer says how fresh the index is.
 
@@ -140,6 +141,7 @@ RefDex runs entirely on your machine. The index is a SQLite database in VS Code'
 
 ## Known limitations
 
-- RefDex links calls by scope and imports, without full type inference. A call on a variable whose type RefDex can't see is linked only when exactly one visible type declares that method. `find_references` then also lists other lines that mention the name, so you can review them.
+- RefDex links calls by scope and imports, without full type inference. A call on a variable whose type RefDex can't see is linked only when exactly one visible type declares that method, or when all of them are one type hierarchy (an interface and its implementations). `find_references` then also lists other lines that mention the name, so you can review them.
+- The blast radius follows linked calls only. Calls on the result of another call (`Joiner.on(",").join(…)`), reflection and dependency injection aren't followed; when there are unlinked calls that could lead to the method, the answer says so and shows an example, so an empty blast radius isn't mistaken for a safe change. "Tests that reach it" means tests that call it through that call graph, not runtime coverage.
 - Dynamic code (Python `getattr`, reflection, code generated at build time) isn't indexed.
 - In a multi-root workspace, one folder is indexed and kept current at a time.

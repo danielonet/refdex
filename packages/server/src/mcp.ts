@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import * as z from 'zod';
 import { existsSync } from 'node:fs';
 import { IndexDb } from '@refdex/core';
-import { RefdexTools } from './tools.ts';
+import { MAX_BLAST_DEPTH, RefdexTools } from './tools.ts';
 import { UsageLog } from './usage.ts';
 
 const INSTRUCTIONS = `RefDex is a method-level index of this workspace's Python, TypeScript, Java and C# code.
@@ -12,7 +12,8 @@ Use it to find and read code instead of opening whole files:
 2. search_symbols to find classes, methods and functions by name;
 3. get_file_outline to see a file's imports and signatures without its bodies;
 4. get_symbol_source to read just the code of one symbol (with_callees adds what it calls);
-5. find_references to see where a symbol is used before changing it.
+5. find_references to see where a symbol is used before changing it; with depth 3 it adds the blast radius:
+   indirect callers and the tests that reach the symbol.
 Answers include file paths and line ranges; source is read from disk, so it is current.`;
 
 /**
@@ -112,16 +113,13 @@ export async function serveMcp(root: string, dbPath: string, version: string, op
       {
         title: 'Search symbols',
         description:
-          'Find classes, interfaces, functions, methods, properties and fields by name across the workspace. ' +
-          'Matches name prefixes (e.g. "OrderServ" finds OrderService; several words must all match). ' +
-          'Returns each symbol\'s kind, qualified name, file:line range and signature - usually enough to answer ' +
-          'without reading the file. Start here before get_symbol_source or opening files.',
+          'Find classes, functions, methods, properties and fields by name or prefix ("OrderServ" finds OrderService). ' +
+          'Returns kind, qualified name, file:lines and signature, often enough without reading the file.',
         inputSchema: {
-          query: z.string().min(1).describe('Name or name prefix, e.g. "OrderService" or "find"; qualified names like "orders:OrderService" work too'),
-          kind: z.enum(['namespace', 'class', 'interface', 'enum', 'type_alias', 'function', 'method', 'property', 'field']).optional()
-            .describe('Only symbols of this kind'),
-          language: z.enum(['python', 'typescript', 'tsx', 'java', 'csharp']).optional().describe('Only symbols in this language'),
-          limit: z.number().int().min(1).max(50).optional().describe('Maximum results (default 20)'),
+          query: z.string().min(1).describe('Name, prefix or qualified name'),
+          kind: z.enum(['namespace', 'class', 'interface', 'enum', 'type_alias', 'function', 'method', 'property', 'field']).optional(),
+          language: z.enum(['python', 'typescript', 'tsx', 'java', 'csharp']).optional(),
+          limit: z.number().int().min(1).max(50).optional().describe('Default 20'),
         },
         annotations: readOnly,
       },
@@ -133,11 +131,10 @@ export async function serveMcp(root: string, dbPath: string, version: string, op
       {
         title: 'Get file outline',
         description:
-          'Show a file\'s imports (with where each resolves) and every symbol\'s signature and line range, nested by ' +
-          'class, without the bodies. Much cheaper than reading the file; use it to understand a file\'s structure, ' +
-          'then get_symbol_source for the parts you need.',
+          'A file\'s imports and its symbols\' signatures and line ranges, nested, without bodies. ' +
+          'Far cheaper than reading the file; then get_symbol_source for the parts you need.',
         inputSchema: {
-          path: z.string().min(1).describe('File path, relative to the workspace root or absolute'),
+          path: z.string().min(1).describe('Relative to the workspace root, or absolute'),
         },
         annotations: readOnly,
       },
@@ -149,16 +146,13 @@ export async function serveMcp(root: string, dbPath: string, version: string, op
       {
         title: 'Get symbol source',
         description:
-          'Read the source code of one symbol (function, method, class, ...) from disk, with its file and line range. ' +
-          'Call only after search_symbols or get_file_outline, when you need implementation details. Overloads and ' +
-          'partial classes return every declaration. Large types return their member list instead; then ask for the ' +
-          'member you need.',
+          'Source of one symbol, read from disk: every overload and partial-class part. Large types return their ' +
+          'member list; then ask for the member you need.',
         inputSchema: {
           qualified_name: z.string().min(1)
-            .describe('Qualified name from search_symbols or get_file_outline, e.g. "src/orders:OrderService.find", "shop.orders.Order.total", "com.acme.Invoice"; a plain name works when unique'),
-          max_lines: z.number().int().min(10).max(2000).optional().describe('Longest source to return before summarizing (default 250)'),
-          with_callees: z.boolean().optional()
-            .describe('Also list the signatures of the functions and methods it calls, saving a lookup per callee'),
+            .describe('From search_symbols or get_file_outline, e.g. "src/orders:OrderService.find", "com.acme.Invoice"; a plain name if unique'),
+          max_lines: z.number().int().min(10).max(2000).optional().describe('Summarize beyond this (default 250)'),
+          with_callees: z.boolean().optional().describe('Add signatures of what it calls'),
         },
         annotations: readOnly,
       },
@@ -170,11 +164,12 @@ export async function serveMcp(root: string, dbPath: string, version: string, op
       {
         title: 'Find references',
         description:
-          'List where a symbol is used: calls, subclasses and implementations, and type references the index linked to ' +
-          'this declaration, each with the calling symbol; then other lines naming it in the files that import its ' +
-          'module or share its package/namespace (imports, values passed around). Use before renaming or changing a signature.',
+          'Where a symbol is used: linked calls, subclasses and type references with the calling symbol, then other ' +
+          'lines naming it in files that can see it. Use before renaming or changing a signature.',
         inputSchema: {
-          qualified_name: z.string().min(1).describe('Qualified name from search_symbols or get_file_outline; a plain name works when unique'),
+          qualified_name: z.string().min(1).describe('As for get_symbol_source'),
+          depth: z.number().int().min(1).max(MAX_BLAST_DEPTH).optional()
+            .describe('2-5: blast radius, callers of callers up to this many levels and the tests reaching it. Use 3 before changing behavior'),
         },
         annotations: readOnly,
       },
@@ -186,12 +181,11 @@ export async function serveMcp(root: string, dbPath: string, version: string, op
       {
         title: 'Get repo map',
         description:
-          'A compact map of the most important code: the symbols used most across the workspace (PageRank over calls, ' +
-          'inheritance and type references), with their signatures, grouped by file and trimmed to a token budget. ' +
-          'Use it first to get oriented in an unfamiliar codebase or folder, then search_symbols or get_symbol_source.',
+          'The most-used symbols with signatures, grouped by file, within a token budget. ' +
+          'Use first to get oriented in an unfamiliar codebase or folder.',
         inputSchema: {
-          token_budget: z.number().int().min(100).max(20000).optional().describe('Approximate size of the answer in tokens (default 1000)'),
-          path: z.string().min(1).optional().describe('Only map code under this folder or file (relative to the workspace root or absolute)'),
+          token_budget: z.number().int().min(100).max(20000).optional().describe('Default 1000'),
+          path: z.string().min(1).optional().describe('Only code under this folder or file'),
         },
         annotations: readOnly,
       },

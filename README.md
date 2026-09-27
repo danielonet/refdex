@@ -9,7 +9,7 @@
 
 RefDex parses TypeScript, Python, Java and C# into a local SQLite index of every class, method, function and property: signatures, doc comments, resolved imports and a call graph. An MCP server lets AI assistants query it. Instead of reading a 900-line file to find one method, the assistant asks for the file's outline, or for just that method, or for everything that calls it.
 
-- **Prompt optimization:** the context window holds the code the task needs, not whole files around it. For example, RefDex's own 915-line database module costs about 11,000 tokens to read whole, about 2,600 as an outline, and about 280 for one method.
+- **Prompt optimization:** the context window holds the code the task needs, not whole files around it. For example, Guava's 1,148-line `CacheBuilder.java` costs about 13,200 tokens to read whole, about 1,100 as an outline, and about 140 for one method.
 - **Large codebases:** incremental, hash-based updates (a saved file in 40–60 ms on a generated 3,000-file project), background indexing, monorepo and namespace-aware import resolution, and a PageRank repo map that shows an assistant the core of an unfamiliar codebase first.
 - **No setup:** inside VS Code, RefDex registers with Copilot automatically and connects to Claude Code with one command. In IntelliJ-based IDEs, one action connects Claude Code, Junie or Copilot. The index stays on your machine.
 
@@ -65,7 +65,7 @@ Index a project, then point an MCP client at `refdex mcp`, for example in Claude
 node packages/server/dist/refdex.cjs index --root /path/to/project   # writes /path/to/project/.refdex/index.db
 ```
 
-Tools: `get_repo_map`, `search_symbols`, `get_file_outline`, `get_symbol_source` (optionally `with_callees`), `find_references`. In the IDEs you don't need this by hand: the VS Code extension registers RefDex with Copilot automatically, and "RefDex: Connect Claude Code…" adds it to Claude Code for the open project. In IntelliJ, **Tools | RefDex | Connect AI Client…** does the same for Claude Code, Junie and Copilot.
+Tools: `get_repo_map`, `search_symbols`, `get_file_outline`, `get_symbol_source` (optionally `with_callees`), `find_references` (optionally `depth` for the blast radius: indirect callers and the tests that reach a symbol). In the IDEs you don't need this by hand: the VS Code extension registers RefDex with Copilot automatically, and "RefDex: Connect Claude Code…" adds it to Claude Code for the open project. In IntelliJ, **Tools | RefDex | Connect AI Client…** does the same for Claude Code, Junie and Copilot.
 
 To run the extension, open `packages/vscode` in VS Code and press F5. To run the IntelliJ plugin in a sandbox IDE, run `./gradlew runIde` in `plugins/intellij`; it needs JDK 21, and its first build downloads the IntelliJ Platform SDK (about 1.5 GB).
 
