@@ -1,0 +1,36 @@
+{
+  "repo": "https://github.com/google/guava",
+  "commit": "4d41665af1",
+  "tasks": [
+    {
+      "id": "find-eviction",
+      "kind": "find",
+      "prompt": "In this repository's main source tree (guava/src, not android/), which method decides which entries to evict when a cache built with CacheBuilder.maximumSize is full? Give its fully qualified name.",
+      "check": ["evictEntries"]
+    },
+    {
+      "id": "joiner-appendable",
+      "kind": "understand a file",
+      "prompt": "In guava/src/com/google/common/base/Joiner.java, which public method joins parts into an Appendable that the caller passes in? Give the method name.",
+      "check": ["appendTo"]
+    },
+    {
+      "id": "callers-expand",
+      "kind": "callers before a change",
+      "prompt": "I want to change LocalCache.Segment.expand() in guava/src (not android/). Which methods in guava/src (main code, not tests) call it directly? Give the method names.",
+      "check": ["\\bput\\b", "storeLoadedValue"]
+    },
+    {
+      "id": "tests-partition",
+      "kind": "tests before a change",
+      "prompt": "I want to change Lists.partition in guava/src. Which test class under guava-tests/ (not android/) tests it directly? Give the class name.",
+      "check": ["ListsTest"]
+    },
+    {
+      "id": "orient-cache",
+      "kind": "orient",
+      "prompt": "I'm new to this codebase. For a LoadingCache built with CacheBuilder in guava/src, which class actually holds the cache entries, and which of its nested classes splits the entries into separately locked parts? Name both classes.",
+      "check": ["LocalCache", "Segment"]
+    }
+  ]
+}

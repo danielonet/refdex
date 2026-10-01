@@ -1,0 +1,15 @@
+{
+  "suite": "bench/tasks/guava.json",
+  "commit": "4d41665af1",
+  "model": "claude-sonnet-5",
+  "runs": 1,
+  "arms": [
+    "baseline",
+    "refdex"
+  ],
+  "tasks": [
+    "joiner-appendable"
+  ],
+  "claude": "2.1.283 (Claude Code)",
+  "refdex": "f63e6d0"
+}

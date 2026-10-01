@@ -5,3 +5,6 @@ out/
 *.db
 *.blob
 .vscode-test/
+
+# Benchmark worktrees, indexes and MCP configs (bench/run.ts)
+bench/work/

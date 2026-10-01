@@ -1,0 +1,74 @@
+{
+  "repo": "https://github.com/google/guava",
+  "commit": "4d41665af1",
+  "about": "Completeness questions grep answers badly: shared method names, overloads told apart by argument type, chained calls, and calls through test helpers. Answers verified by hand (2026-09-30; expand-tests corrected after the first run: SegmentBenchmark.time is a direct caller, and the disabled ignoreTestExpandDuringRefresh is optional); `forbid` lists the traps.",
+  "tasks": [
+    {
+      "id": "bytesink-openstream-callers",
+      "kind": "callers through a base type",
+      "prompt": "I want to change the contract of com.google.common.io.ByteSink.openStream(). Which methods in guava/src (main code, not android/, not tests) call openStream() on a ByteSink, i.e. on a ByteSink or subclass receiver, including implicit this? Don't include calls to openStream() on other types (ByteSource, CharSource, CharSink, URL). List every such method as Class.method, including nested classes (Outer.Inner.method).",
+      "expect": [
+        "openBufferedStream",
+        "\\bwrite\\b",
+        "writeFrom",
+        "AsCharSink\\W+openStream",
+        "ByteSource\\W+copyTo"
+      ],
+      "forbid": [
+        "BaseEncoding\\W+(encodingSink|openStream)",
+        "CharSource\\W+copyTo"
+      ]
+    },
+    {
+      "id": "copyto-bytesink-tests",
+      "kind": "overloads by argument type",
+      "prompt": "ByteSource.copyTo has overloads for a ByteSink and for an OutputStream. Which methods in guava-tests/ (not android/) call ByteSource.copyTo with a ByteSink argument? Include test helper methods. Don't include calls with an OutputStream argument or calls to CharSource.copyTo. List every such method as Class.method.",
+      "expect": [
+        "ByteSourceTester\\W+testCopyTo_byteSink",
+        "ByteSourceTest\\W+testCopyTo_byteSink",
+        "ByteSourceTest\\W+testClosesOnErrors_copyingToByteSinkThatThrows",
+        "ByteSourceTest\\W+testClosesOnErrors_whenReadThrows",
+        "runSuppressionFailureTest",
+        "ByteSinkTest\\W+testClosesOnErrors_copyingFromByteSourceThatThrows",
+        "ByteSinkTest\\W+testClosesOnErrors_whenWriteThrows"
+      ],
+      "forbid": [
+        "testCopyTo_outputStream",
+        "testCopyToStream_doesNotCloseThatStream",
+        "copyingToOutputStreamThatThrows",
+        "(CharSourceTest|CharSinkTest|CharSourceTester)\\W+test\\w+"
+      ]
+    },
+    {
+      "id": "segment-put-callers",
+      "kind": "chained calls",
+      "prompt": "Which methods in guava/src (main code, not android/) call com.google.common.cache.LocalCache.Segment.put(K key, int hash, V value, boolean onlyIfAbsent) directly? Only direct calls: not methods that reach it through another method. List every such method as Class.method.",
+      "expect": [
+        "(^|[^\\w])LocalCache\\W+put\\b",
+        "putIfAbsent"
+      ],
+      "forbid": [
+        "LocalManualCache\\W+put",
+        "LocalCache\\W+putAll"
+      ]
+    },
+    {
+      "id": "expand-tests",
+      "kind": "tests through helpers",
+      "prompt": "Which methods in guava-tests/ (not android/) call com.google.common.cache.LocalCache.Segment.expand() directly, and which test methods call such a helper method? Don't include calls to expand() on other classes. List every such method as Class.method.",
+      "expect": [
+        "LocalCacheTest\\W+testExpand\\b",
+        "testExpand_cleanup",
+        "forceExpandSegment",
+        "testExpandDuringLoading",
+        "SegmentBenchmark\\W+time"
+      ],
+      "forbid": [
+        "MapMakerInternalMapTest\\W+\\w+"
+      ],
+      "optional": [
+        "ignoreTestExpandDuringRefresh (a disabled test: listing it or not are both fine)"
+      ]
+    }
+  ]
+}

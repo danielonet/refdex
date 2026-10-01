@@ -262,7 +262,8 @@ Tools only where they pay off (2026-09-25):
 
 - [ ] Fixture repo per language covering its edge cases
 - [ ] Performance test on a large repo
-- [ ] Token-usage comparison with and without the index
+- [x] Token-usage comparison with and without the index (2026-09-30, Claude Code; see "Token benchmark" below)
+- [x] Accuracy comparison on questions grep answers incompletely (2026-09-30; see "Accuracy benchmark" below)
 - [x] Package `.vsix` and publish to the Marketplace (0.1.3 is live)
 
 ### Phase 6: IntelliJ plugin
@@ -298,6 +299,53 @@ Phase 6 notes (2026-09-26):
 - **Leaner answers:** `get_file_outline` falls back to names only, then to types with member counts, beyond about 2,000 tokens (Guava's `LocalCache.java`: 15,900 → 1,300 tokens). `find_references` lists 15 lines matched by name, then counts the rest per file (`recordStats`: 2,850 → 820 tokens).
 - **Token review, measured on Guava:** a method from `get_symbol_source` costs 140–1,500 tokens against 13,000–15,000 for reading its file; an outline 1,100–1,300 against 13,000–38,000. So one lookup that replaces a whole-file read pays for about 10 requests of fixed cost. Whether agents do that in practice is not shown yet: in the usage logs on the development machine, Claude Code connected to Guava with the tools on and made no calls. The Phase 5 token comparison (same tasks with and without RefDex) is the open question that decides the threshold and the product claim.
 - **Open:** calls on the result of another call (`Joiner.on(",").join(…)`, builder chains) aren't linked: 18% of Guava's calls, 11% naming a method in Guava itself, so linking them could add up to 29% more linked calls. Resolving them needs return types from signatures. Until then the blast radius reports them: every unlinked call named like the target, and calls on call results named like a caller it walked through (all unlinked calls there would mostly be library methods such as `Map.put`). For `CacheBuilder.recordStats`, an empty blast radius now says "78 unlinked calls, e.g. `CacheBuilder.newBuilder().recordStats(…)`".
+
+
+### Token benchmark (2026-09-30)
+
+`bench/` runs the same tasks in Claude Code (2.1.283, Claude Sonnet 5) with and without RefDex, on a Guava worktree, and compares tokens (method: `bench/README.md`). Each run is an isolated `claude -p` session; cost is priced with caching inside the run only, since the real bill was 70% lower because of cache hits left by earlier runs.
+
+| Suite | Tasks | Sessions | Cost with RefDex | Used RefDex | Correct |
+| --- | --- | --- | --- | --- | --- |
+| Quick lookups (`guava.json`) | find a method, a method in a file, callers, tests, orientation | 30 | ±0% | 7 of 15 runs | 30/30 |
+| Longer tasks (`guava-long.json`) | trace two flows, plan a change, find implementations, understand a large class | 30 | +5% | 3 of 15 runs | 30/30 |
+
+With 3 runs per task, differences under about 10% are noise: **RefDex made no measurable difference to tokens.**
+
+- **Why:** the agents already work the way RefDex was meant to help them. Without RefDex they grepped with line numbers and read line ranges (26 of 32 reads; median 434–914 tokens a read, at most 5,400), and a grep answer is about 50 tokens. RefDex's search answers were larger (median ~720 tokens), and the first RefDex call in a session costs an extra turn, because Claude Code loads MCP tool definitions on demand (`ToolSearch`).
+- **Standing cost in Claude Code is ~370 tokens per request,** the tool names only, not ~1,200: Claude Code defers MCP tool definitions. Clients that load them up front (Copilot) still pay ~1,200.
+- **Claude Code's own prompt dominates short tasks:** ~33,300 tokens written to the cache at the start of every session ($0.133 of a median $0.156 run), which leaves little for any tool to save.
+- **Consequences:** "fewer tokens per task" is not supported for Claude Code and should come out of the product pitch. Still open: accuracy on questions grep answers incompletely (callers through interfaces, transitive callers, tests that reach a method), other clients (Copilot, Junie), smaller models, and much larger repositories. `search_symbols` should return less by default.
+
+### Accuracy benchmark (2026-09-30)
+
+`bench/tasks/guava-accuracy.json`: four completeness questions chosen to be hard for grep, each with an answer verified by hand and traps that a careless answer would include, graded on recall and false positives (24 sessions, same setup as the token benchmark).
+
+| Task | What makes it hard for grep | Baseline | With RefDex | RefDex's index alone |
+| --- | --- | --- | --- | --- |
+| Callers of `ByteSink.openStream` | 21 methods share the name; calls via `ByteSink.this.` and parameters | 3/3 | 3/3 | links 3 of 5 |
+| Tests calling `ByteSource.copyTo(ByteSink)` | overloads told apart by argument type | 1/3 (86% recall) | 3/3 | links both overloads under one name |
+| Callers of `LocalCache.Segment.put` | chained calls (`segmentFor(hash).put(…)`) | 3/3 | 3/3 | links 0 of 2 |
+| Tests reaching `Segment.expand` via helpers | two hops; a same-named method on another class | 3/3 | 3/3 | complete |
+
+- **The agent called RefDex in none of the 12 runs that had it.** The difference in the copyTo task is therefore run-to-run variation, not RefDex. Grep and ranged reads reached 96% recall with no false positives on questions designed to be hard for grep.
+- **RefDex's index would not have done better:** it links 3 of the 5 `openStream` callers and none of the chained `Segment.put` callers.
+- **The first run exposed two errors in the hand-built answer key** (a benchmark caller of `expand()` outside `test/`, which the agents found, and a disabled test that is reasonable to leave out), plus a trap pattern that matched an answer explaining what it excluded. `bench/regrade.ts` re-grades saved transcripts after such fixes.
+- **Conclusion:** for Claude Code with Claude Sonnet 5 on Guava, neither benchmark shows a benefit in tokens or accuracy, and the agent mostly doesn't choose RefDex. Untested: other clients (Copilot, Junie), smaller models, much larger repositories, and people using the IDE features (blast radius) directly.
+
+### Weaker-model benchmark (2026-10-01)
+
+Both suites rerun with Claude Haiku 4.5 in place of Sonnet (54 sessions). Every failure was checked against its transcript: none came from a wrong RefDex answer (the two `expand-tests` trap failures used RefDex zero times) or a bad answer key.
+
+| Suite | Cost with RefDex | Recall: baseline → RefDex | Passed: baseline → RefDex | RefDex used |
+| --- | --- | --- | --- | --- |
+| Accuracy (grep-hard) | +7% | 93% → 86% | 10/12 → 9/12 | 3 of 12 |
+| Long tasks | −18% | 87% → 93% | 13/15 → 14/15 | 5 of 15 |
+
+- **The real difference is Haiku itself, not RefDex.** On the accuracy suite Haiku's median context was 778k tokens against Sonnet's 225k on the same tasks (one run reached 1.5M), in 25 turns against 6. A few-thousand-token RefDex answer barely registers against that. The long suite, where Haiku's token use was closer to Sonnet's (157k vs 160k), is also where RefDex's one favorable result sits.
+- **RefDex was used more with Haiku than with Sonnet** (3/12 and 5/15, vs 0/12 and 3/15 on the same suites), consistent with a weaker model leaning on tools more.
+- **The two suites disagree,** and 3 runs per arm can't settle it. Long tasks look favorable; accuracy tasks look unfavorable, but that drop in recall traces to two RefDex-arm runs that didn't call RefDex and simply truncated their answer.
+- **Across every run so far (138 sessions: Sonnet lookups, Sonnet long/accuracy, Haiku long/accuracy),** the Haiku long-task result is the only directionally positive one, and it's not strong enough to act on alone.
 
 ## Testing and success metrics
 

@@ -1,0 +1,36 @@
+{
+  "repo": "https://github.com/google/guava",
+  "commit": "4d41665af1",
+  "tasks": [
+    {
+      "id": "refresh-flow",
+      "kind": "trace a flow",
+      "prompt": "In guava/src (not android/), explain how refreshAfterWrite works in LocalCache: when a read finds an entry that is due for refresh, which LocalCache.Segment methods run, in order, until the new value is stored? List them.",
+      "check": ["scheduleRefresh", "loadAsync", "storeLoadedValue"]
+    },
+    {
+      "id": "spec-new-option",
+      "kind": "plan a change",
+      "prompt": "I want to add a new option to CacheBuilderSpec in guava/src (not android/), so that the spec string can set it. Which fields and methods of CacheBuilderSpec do I need to change or extend? List them.",
+      "check": ["VALUE_PARSERS|ValueParser", "toCacheBuilder", "equals|hashCode"]
+    },
+    {
+      "id": "transform-flow",
+      "kind": "trace a flow",
+      "prompt": "In guava/src (not android/), trace what happens when I call Futures.transform(input, function, executor): which class and methods create the output future, how does it get notified when input completes, and which method applies the function? Name the class and methods.",
+      "check": ["AbstractTransformFuture", "addListener", "doTransform"]
+    },
+    {
+      "id": "cache-implementations",
+      "kind": "find implementations",
+      "prompt": "Which classes in guava/src (main code, not android/, not tests) directly implement the com.google.common.cache.Cache interface, i.e. declare `implements Cache<K, V>` themselves? List them all.",
+      "check": ["AbstractCache", "ForwardingCache", "LocalManualCache"]
+    },
+    {
+      "id": "read-recency",
+      "kind": "understand a large class",
+      "prompt": "In guava/src/com/google/common/cache/LocalCache.java, how does a cache read record access order for LRU eviction without taking the segment lock? Name the method called on a read, the queue it uses, and the method that later drains that queue.",
+      "check": ["recordRead", "recencyQueue", "drainRecencyQueue"]
+    }
+  ]
+}
