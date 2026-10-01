@@ -1,8 +1,12 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { blastRadius, IndexDb, IndexNotReadyError, pageRank, type BlastCaller, type ImportRow, type SymbolRow, type UnlinkedCalls } from '@refdex/core';
+import {
+  blastRadius, entryDoc, entryHeader, IndexDb, IndexNotReadyError, packContext, pageRank, seedsFromTask, tokens,
+  type BlastCaller, type ContextEntry, type ImportRow, type SymbolRow, type UnlinkedCalls,
+} from '@refdex/core';
 
 const MAX_SEARCH_RESULTS = 50;
 const DEFAULT_MAX_LINES = 250;
@@ -25,6 +29,12 @@ export const MAX_BLAST_DEPTH = 5;
 /** Rough characters per token for the repo map's budget. */
 const CHARS_PER_TOKEN = 4;
 const TYPE_KINDS = new Set(['class', 'interface', 'enum', 'type_alias']);
+export const DEFAULT_CONTEXT_TOKENS = 4000;
+export const MAX_CONTEXT_TOKENS = 50_000;
+/** Tokens kept for get_context's header and savings line. */
+const CONTEXT_FRAME_TOKENS = 150;
+/** Symbols changed in the working tree that become seeds, at most. */
+const MAX_CHANGED_SEEDS = 12;
 
 /**
  * The logic behind RefDex's MCP tools, over a read-only connection to the index. Every answer is
@@ -374,6 +384,110 @@ export class RefdexTools {
     });
   }
 
+  /**
+   * get_context: the code a task needs, packed into a token budget. Seeds come from the names in
+   * the task, from `seeds` (qualified names) and, with `changes`, from symbols changed in the git
+   * working tree. Output is deterministic for the same index and input (besides the freshness line):
+   * files in path order, symbols in line order, no scores.
+   */
+  async getContext(args: { task: string; budget?: number; seeds?: string[]; changes?: boolean; depth?: number }): Promise<string> {
+    return this.guard(async (db) => {
+      const budget = Math.min(args.budget ?? DEFAULT_CONTEXT_TOKENS, MAX_CONTEXT_TOKENS);
+      const { scores } = this.rankScores(db);
+      const seedIds: number[] = [];
+      const notFound: string[] = [];
+      for (const name of args.seeds ?? []) {
+        const found = this.findSymbols(db, name);
+        if (typeof found === 'string') notFound.push(name);
+        else for (const s of found) if (!seedIds.includes(s.id)) seedIds.push(s.id);
+      }
+      if (args.changes) for (const id of await this.changedSymbols(db)) if (!seedIds.includes(id)) seedIds.push(id);
+      const fromTask = seedsFromTask(db, args.task, scores);
+      for (const id of fromTask.named) if (!seedIds.includes(id)) seedIds.push(id);
+      let related = fromTask.related.filter((id) => !seedIds.includes(id));
+      // Nothing named exactly: the best matches for the task's words are the place to start.
+      if (!seedIds.length) {
+        seedIds.push(...related);
+        related = [];
+      }
+      const missing = notFound.length ? `\nNot in the index: ${notFound.join(', ')}.` : '';
+      if (!seedIds.length) {
+        return `${this.freshness(db)}\nNo code matches the task's names.${missing} Name a class or method (e.g. "OrderService.place"), ` +
+          'pass seeds, or set changes to start from the files changed in git; search_symbols finds names.';
+      }
+
+      // The header and the savings line come on top of the packed symbols.
+      const packed = packContext(db, seedIds, { budget: budget - CONTEXT_FRAME_TOKENS, depth: args.depth, ranks: scores, related, tests: /\btest/i.test(args.task) });
+      const body: string[] = [];
+      const sources = new Map<string, string[] | undefined>();
+      const files = [...new Set(packed.entries.map((e) => e.symbol.path))];
+      for (const path of files) {
+        body.push(this.rel(path));
+        const inFile = packed.entries.filter((e) => e.symbol.path === path);
+        const shown = new Set(inFile.map((e) => e.symbol.id));
+        const depthOf = (e: ContextEntry) => {
+          let d = 1;
+          for (let p = e.symbol.parent_id; p !== null && shown.has(p); p = inFile.find((x) => x.symbol.id === p)?.symbol.parent_id ?? null) d++;
+          return d;
+        };
+        for (const e of inFile) {
+          const indent = '  '.repeat(depthOf(e));
+          body.push(`${indent}${entryHeader(e.symbol, e.level)}`);
+          if (e.level === 3) body.push(`${indent}  ${entryDoc(e.symbol)}`);
+          if (e.level === 4) {
+            if (!sources.has(path)) sources.set(path, (await readFile(path, 'utf8').catch(() => undefined))?.split(/\r?\n/));
+            const lines = sources.get(path);
+            body.push(lines ? reindent(lines.slice(e.symbol.start_line - 1, e.symbol.end_line), `${indent}  `) : `${indent}  (file no longer exists)`);
+          }
+        }
+      }
+
+      const count = (level: number) => packed.entries.filter((e) => e.level === level).length;
+      const seeds = [...new Set(packed.entries.filter((e) => e.seed).map((e) => e.symbol.qualified_name))];
+      const text = body.join('\n');
+      const returned = tokens(text.length);
+      const whole = tokens([...db.fileChars(files).values()].reduce((a, b) => a + b, 0));
+      const saved = whole > returned ? ` (${Math.round((1 - returned / whole) * 100)}% less)` : '';
+      return [
+        `${this.freshness(db)}`,
+        `Context for the task within ${budget.toLocaleString('en-US')} tokens: ${packed.entries.length} symbols in ${files.length} files ` +
+          `(${count(4)} with code, ${count(3) + count(2)} signatures, ${count(1)} names) from ${packed.candidates} candidates.` +
+          (seeds.length ? ` Starting from ${seeds.slice(0, 6).join(', ')}${seeds.length > 6 ? ', …' : ''}.` : '') + missing,
+        'Files in path order; lines are "start-end", code is current from disk. get_symbol_source reads code shown as signatures only.',
+        text,
+        `[~${returned.toLocaleString('en-US')} tokens; reading these ${files.length} files whole: ~${whole.toLocaleString('en-US')} tokens${saved}]`,
+      ].join('\n');
+    });
+  }
+
+  /** Symbols whose lines changed in the git working tree (staged or not), innermost first. */
+  private async changedSymbols(db: IndexDb): Promise<number[]> {
+    const diff = await new Promise<string>((done) =>
+      execFile('git', ['diff', 'HEAD', '--unified=0', '--no-color', '--no-ext-diff'], { cwd: this.root, maxBuffer: 20_000_000 },
+        (err, stdout) => done(err ? '' : stdout)));
+    const ranges = new Map<string, { start: number; end: number }[]>();
+    let file: string | undefined;
+    for (const line of diff.split('\n')) {
+      const target = /^\+\+\+ (?:b\/(.*)|\/dev\/null)$/.exec(line);
+      if (target) file = target[1] ? resolve(this.root, target[1]) : undefined;
+      const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      if (hunk && file) {
+        const start = Number(hunk[1]);
+        const n = hunk[2] === undefined ? 1 : Number(hunk[2]);
+        // A pure deletion (+N,0) touches the symbol around line N.
+        ranges.set(file, [...(ranges.get(file) ?? []), { start: Math.max(start, 1), end: start + Math.max(n, 1) - 1 }]);
+      }
+    }
+    const ids: number[] = [];
+    for (const [path, r] of [...ranges].sort(([a], [b]) => a.localeCompare(b))) {
+      // Innermost symbols: the method that changed, not its class too.
+      const rows = db.symbolsAtLines(path, r);
+      const parents = new Set(rows.map((s) => s.parent_id));
+      for (const s of rows) if (!parents.has(s.id) && s.kind !== 'namespace' && s.kind !== 'module') ids.push(s.id);
+    }
+    return ids.slice(0, MAX_CHANGED_SEEDS);
+  }
+
   /** PageRank scores and the symbols anything uses, cached until the index changes. */
   private rankScores(db: IndexDb): { scores: Map<number, number>; used: Set<number> } {
     const { indexedAt, files, symbols, resolvedEdges } = db.stats();
@@ -494,6 +608,12 @@ function dedupe(rows: SymbolRow[]): SymbolRow[] {
     seen.add(key);
     return true;
   });
+}
+
+/** The lines with their common indentation replaced by `indent`, so a body sits under its header. */
+function reindent(lines: string[], indent: string): string {
+  const common = Math.min(...lines.filter((l) => l.trim()).map((l) => /^[ \t]*/.exec(l)![0].length));
+  return lines.map((l) => (l.trim() ? indent + l.slice(Number.isFinite(common) ? common : 0) : '')).join('\n');
 }
 
 function clip(text: string, max = MAX_LINE_LENGTH): string {

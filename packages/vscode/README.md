@@ -33,6 +33,7 @@ Every token an assistant spends reading irrelevant code is a token it can't spen
 | Its callers, before a change | Text search and reading the matches | `find_references`: each use, with the method it's in |
 | The blast radius of a change | Following callers of callers by hand | `find_references` with `depth`: indirect callers level by level, and the tests that reach it |
 | To get oriented in a new codebase | Browse folders and read files | `get_repo_map`: the most-used code, trimmed to a token budget |
+| Everything a task touches | Many searches and file reads, one by one | `get_context`: the code the task names, what it calls and what calls it, in one answer within a token budget |
 
 For example, Guava's `CacheBuilder.java` is 1,148 lines, about **13,200 tokens** to read whole. Its outline costs about **1,100 tokens**, and one method about **140**. Outlines of very large files stay small: Guava's 5,000-line `LocalCache.java` (about 38,000 tokens) outlines in about 1,300. (Token counts are estimated at 4 characters per token.)
 
@@ -69,6 +70,7 @@ That's it. The assistant is told what the tools are for and uses them without be
 
 | Tool | What it answers |
 | --- | --- |
+| `get_context` | "What do I need for this task?": the bodies of the methods the task names, the signatures of what they call and what calls them, and the tests that reach them, packed into a token budget (default 4,000). Can also start from given names or from the symbols changed in git. Ends with how many tokens it saved over reading those files whole |
 | `get_repo_map` | "What matters in this codebase?": the most-used symbols with signatures, grouped by file, within a token budget; optionally for one folder |
 | `search_symbols` | "Where is X?": classes, functions, methods, properties and fields by name or prefix, filtered by kind or language |
 | `get_file_outline` | "What's in this file?": imports (and where they resolve), plus every signature and line range, nested by class |

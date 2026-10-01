@@ -6,18 +6,19 @@ All notable changes to RefDex are listed here. The format follows [Keep a Change
 
 ### Added
 
+- **`get_context`: everything a task needs in one call** (RefDex v2, first step). Given the task in words, the AI gets the code of the methods it names, the signatures of what they call and what calls them, and the tests that reach them, packed into a token budget (default 4,000). Code close to the task gets more detail; code further out gets a signature or just its name. It can also start from names the AI passes, or from the symbols changed in git. Each answer ends with the tokens it returned and what reading those files whole would have cost. The plan is in `docs/refdex-v2-plan.md`.
 - **Blast radius for AI assistants.** `find_references` takes a `depth` (2–5): callers of the callers up to that many levels, including calls through the interfaces and base methods a method implements, and the tests that reach it. When calls the index couldn't link may lead to the method (for example `CacheBuilder.newBuilder().recordStats()`), the answer says the blast radius may be incomplete and shows one.
 
 ### Changed
 
 - **Smaller answers.** File outlines of very large files show names only, or only their types, instead of every signature, and `find_references` lists at most 15 lines that only match by name, then counts the rest per file.
-- **Smaller tool definitions**, back to about 1,200 tokens per AI request.
+- **Smaller tool definitions** for the existing tools. With `get_context` added, the definitions take about 1,500 tokens per AI request (about 300 of them for `get_context`).
 
 ### Fixed
 
 - Calls through an interface (`store.save()` where both `Store` and `DiskStore` declare `save`) are now linked to the interface method, so `find_references` finds them.
 - In Java, `import static a.Util.x` no longer makes every member of `Util` visible, which could link calls to the wrong method.
-- The index is rebuilt once after this update, automatically. The "no index" message also explains what to do in JetBrains IDEs.
+- The index is rebuilt once after this update, automatically (it now records each symbol's size, for `get_context`'s budget). The "no index" message also explains what to do in JetBrains IDEs.
 
 ## [0.1.3] - 2026-09-25
 

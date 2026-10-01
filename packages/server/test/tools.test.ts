@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -223,5 +224,99 @@ describe('MCP tools: python, java, csharp', () => {
   it('answers helpfully when there is no index yet', async () => {
     const tools = new RefdexTools('/tmp/nowhere', '/tmp/nowhere/.refdex/index.db');
     assert.match(await tools.searchSymbols({ query: 'x' }), /index has not been built yet.*refdex index --root \/tmp\/nowhere/s);
+  });
+});
+
+describe('MCP tools: get_context', () => {
+  /** A small service with callers, callees and a test, so the graph has every kind of neighbour. */
+  const files = {
+    'tsconfig.json': '{}',
+    'src/pricing.ts': [
+      '/** Rounds an amount to whole cents. */',
+      'export function roundCents(amount: number): number {',
+      '  return Math.round(amount * 100) / 100;',
+      '}',
+      '',
+      'export function taxFor(amount: number): number {',
+      '  return roundCents(amount * 0.2);',
+      '}',
+      '',
+    ].join('\n'),
+    'src/cart.ts': [
+      "import { roundCents, taxFor } from './pricing';",
+      '',
+      '/** A shopping cart. */',
+      'export class Cart {',
+      '  private items: number[] = [];',
+      '',
+      '  add(price: number): void {',
+      '    this.items.push(price);',
+      '  }',
+      '',
+      '  total(): number {',
+      '    const net = this.items.reduce((a, b) => a + b, 0);',
+      '    return roundCents(net + taxFor(net));',
+      '  }',
+      '}',
+      '',
+    ].join('\n'),
+    'src/checkout.ts': [
+      "import { Cart } from './cart';",
+      '',
+      'export function checkout(cart: Cart): string {',
+      '  return `Total: ${cart.total()}`;',
+      '}',
+      '',
+    ].join('\n'),
+    'test/cart.test.ts': [
+      "import { Cart } from '../src/cart';",
+      '',
+      'export function testTotal(): void {',
+      '  const cart = new Cart();',
+      '  cart.add(10);',
+      '  if (cart.total() !== 12) throw new Error();',
+      '}',
+      '',
+    ].join('\n'),
+  };
+  let t: Awaited<ReturnType<typeof toolsFor>>;
+  before(async () => { t = await toolsFor(files); });
+  after(() => t.cleanup());
+  const body = (out: string) => out.split('\n').slice(1).join('\n');
+
+  it('returns the named method with its code, and what it calls and what calls it', async () => {
+    const out = await t.tools.getContext({ task: 'Change how Cart.total() adds tax' });
+    assert.match(out, /^\[RefDex index: 4 files, updated just now\]\nContext for the task within 4,000 tokens: \d+ symbols in 4 files/);
+    assert.match(out, /Starting from src\/cart:Cart\.total\./);
+    // The seed's body, re-indented under its header inside its class.
+    assert.match(out, /\nsrc\/cart\.ts\n {2}4-15 class Cart\n(.*\n)* {4}11-14 method total\n {6}total\(\): number \{\n {8}const net/);
+    // Callees and callers, each in its file.
+    assert.match(out, /\nsrc\/pricing\.ts\n(.*\n)* {2}.*roundCents/);
+    assert.match(out, /\nsrc\/checkout\.ts\n {2}3-5 /);
+    assert.match(out, /\ntest\/cart\.test\.ts\n/);
+    assert.match(out, /\n\[~\d+ tokens; reading these 4 files whole: ~\d+ tokens.*\]$/);
+  });
+
+  it('is deterministic and stays within the budget', async () => {
+    const args = { task: 'Change how Cart.total() adds tax', budget: 500 };
+    const a = await t.tools.getContext(args);
+    assert.equal(body(a), body(await t.tools.getContext(args)));
+    assert.ok(a.length / 4 <= 500, `${a.length / 4} tokens`);
+    // A tighter budget shows less detail, not more than it can hold.
+    const full = await t.tools.getContext({ ...args, budget: 4000 });
+    assert.ok(a.length < full.length);
+  });
+
+  it('starts from explicit seeds, from plain words and from the git working tree', async () => {
+    assert.match(await t.tools.getContext({ task: 'what does this do', seeds: ['src/pricing:taxFor'] }), /Starting from src\/pricing:taxFor\./);
+    assert.match(await t.tools.getContext({ task: 'how is a checkout summary built', seeds: ['nope.Missing'] }), /Not in the index: nope\.Missing\.[\s\S]*src\/checkout\.ts/);
+    assert.match(await t.tools.getContext({ task: 'something unrelated entirely' }), /No code matches the task's names\./);
+
+    execFileSync('git', ['init', '-q'], { cwd: t.root });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'init', '--allow-empty'], { cwd: t.root });
+    execFileSync('git', ['add', '.'], { cwd: t.root });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'files'], { cwd: t.root });
+    await writeFile(join(t.root, 'src/pricing.ts'), files['src/pricing.ts'].replace('0.2', '0.25'));
+    assert.match(await t.tools.getContext({ task: 'review my change', changes: true }), /Starting from src\/pricing:taxFor\./);
   });
 });

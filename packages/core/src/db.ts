@@ -10,8 +10,9 @@ const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof impor
 /**
  * Bump when the schema or reference resolution changes. The index is a cache, so an old one is
  * simply rebuilt. 6: calls through an interface or base method, and single-member static imports.
+ * 7: characters of source per symbol, for get_context's token budget.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 // Few indexes on edges: every save rewrites a file's edges. edges_to is partial because most edges
 // start (and many stay) unresolved; lookups by target imply NOT NULL, so SQLite still uses it.
@@ -46,6 +47,8 @@ CREATE TABLE symbols (
   parent_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
   exported INTEGER NOT NULL DEFAULT 0,
   is_partial INTEGER NOT NULL DEFAULT 0,
+  -- Characters of source from start_line to end_line: what reading the symbol's code costs.
+  chars INTEGER NOT NULL DEFAULT 0,
   -- Non-canonical part of a partial type: points at the canonical symbol (see symbol_parts).
   merged_into INTEGER REFERENCES symbols(id) ON DELETE SET NULL
 );
@@ -129,6 +132,8 @@ export interface SymbolRow {
   end_line: number;
   parent_id: number | null;
   exported: number;
+  /** Characters of source from start_line to end_line. */
+  chars: number;
 }
 
 export interface ImportRow {
@@ -202,7 +207,7 @@ export interface IndexStats {
 }
 
 const SYMBOL_COLUMNS = `s.id, s.kind, s.native_kind, s.name, s.qualified_name, s.namespace, s.signature, s.doc,
-  f.path, f.language, s.start_line, s.end_line, s.parent_id, s.exported`;
+  f.path, f.language, s.start_line, s.end_line, s.parent_id, s.exported, s.chars`;
 
 const IMPORT_COLUMNS = `i.id, i.file_id, f.path, f.language, i.kind, i.spec, i.names, i.alias, i.is_global, i.line,
   i.resolved_file_id, rf.path AS resolved_path, i.resolved_namespace, i.resolved_symbol_id`;
@@ -303,8 +308,10 @@ export class IndexDb {
   /**
    * Replaces a file's symbols, imports and edges. Call inside `transaction`. Returns the file id,
    * which stays the same for a file that was indexed before, so imports of it stay resolved.
+   * `source` sizes the file and each symbol (characters, about 4 per token).
    */
-  replaceFile(path: string, hash: string, project: string, parsed: ParsedFile, chars = 0): number {
+  replaceFile(path: string, hash: string, project: string, parsed: ParsedFile, source = ''): number {
+    const chars = source.length;
     const now = new Date().toISOString();
     const existing = this.stmt('SELECT id FROM files WHERE path = ?').get(path) as { id: number } | undefined;
     let fileId: number;
@@ -321,16 +328,19 @@ export class IndexDb {
       fileId = Number(lastInsertRowid);
     }
     const insertSymbol = this.stmt(
-      `INSERT INTO symbols (file_id, kind, native_kind, name, qualified_name, namespace, signature, doc, start_line, end_line, parent_id, exported, is_partial)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO symbols (file_id, kind, native_kind, name, qualified_name, namespace, signature, doc, start_line, end_line, parent_id, exported, is_partial, chars)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const lineStarts = [0];
+    for (let i = source.indexOf('\n'); i !== -1; i = source.indexOf('\n', i + 1)) lineStarts.push(i + 1);
+    const span = (start: number, end: number) => (lineStarts[end] ?? chars) - (lineStarts[start - 1] ?? chars);
     // Symbols arrive parent-first, so a parent's row id is known before its children.
     const ids = new Map<ExtractedSymbol, number>();
     for (const s of parsed.symbols) {
       const parentId = s.parent ? (ids.get(s.parent) ?? null) : null;
       const { lastInsertRowid: id } = insertSymbol.run(
         fileId, s.kind, s.nativeKind, s.name, s.qualifiedName, s.namespace, s.signature, s.doc,
-        s.startLine, s.endLine, parentId, s.exported ? 1 : 0, s.partial ? 1 : 0,
+        s.startLine, s.endLine, parentId, s.exported ? 1 : 0, s.partial ? 1 : 0, span(s.startLine, s.endLine),
       );
       ids.set(s, Number(id));
     }
@@ -599,6 +609,50 @@ export class IndexDb {
        WHERE e.to_symbol_id IS NOT NULL AND e.to_symbol_id != coalesce(s.merged_into, s.id)
        GROUP BY 1, 2`,
     ).all() as { from: number; to: number; count: number }[];
+  }
+
+  /**
+   * Symbols linked to the given ones by a resolved edge, in either direction: what they call, extend
+   * or reference, and what calls, extends or references them. Parts of a partial type count as
+   * their canonical symbol. For get_context's graph expansion.
+   */
+  neighbours(symbolIds: number[]): { from: number; to: number; type: EdgeType }[] {
+    return this.stmt(
+      `WITH ids(id) AS (SELECT value FROM json_each(?1)
+         UNION SELECT s.id FROM symbols s WHERE s.merged_into IN (SELECT value FROM json_each(?1)))
+       SELECT DISTINCT coalesce(s.merged_into, s.id) AS "from", e.to_symbol_id AS "to", e.type
+       FROM edges e JOIN symbols s ON s.id = e.from_symbol_id
+       WHERE e.from_symbol_id IN ids AND e.to_symbol_id IS NOT NULL
+       UNION
+       SELECT DISTINCT coalesce(s.merged_into, s.id), e.to_symbol_id, e.type
+       FROM edges e JOIN symbols s ON s.id = e.from_symbol_id
+       WHERE e.to_symbol_id IN ids
+       ORDER BY 1, 2`,
+    ).all(JSON.stringify(symbolIds)) as { from: number; to: number; type: EdgeType }[];
+  }
+
+  /** Symbols by id (partial types: the canonical part), in id order. */
+  symbolsById(ids: number[]): SymbolRow[] {
+    return this.stmt(
+      `SELECT ${SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+       WHERE s.id IN (SELECT value FROM json_each(?)) AND s.merged_into IS NULL ORDER BY s.id`,
+    ).all(JSON.stringify(ids)) as unknown as SymbolRow[];
+  }
+
+  /** Characters of source per file, for the files given by path. */
+  fileChars(paths: string[]): Map<string, number> {
+    const rows = this.stmt('SELECT path, chars FROM files WHERE path IN (SELECT value FROM json_each(?))')
+      .all(JSON.stringify(paths)) as { path: string; chars: number }[];
+    return new Map(rows.map((r) => [r.path, r.chars]));
+  }
+
+  /** Symbols whose lines overlap the given 1-based line ranges of a file, innermost last. */
+  symbolsAtLines(path: string, ranges: { start: number; end: number }[]): SymbolRow[] {
+    return this.stmt(
+      `SELECT DISTINCT ${SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id, json_each(?2) r
+       WHERE f.path = ?1 AND s.start_line <= json_extract(r.value, '$.end') AND s.end_line >= json_extract(r.value, '$.start')
+       ORDER BY s.start_line, s.id`,
+    ).all(path, JSON.stringify(ranges)) as unknown as SymbolRow[];
   }
 
   /** Every symbol with what the repo map shows of it (partial types: the canonical part only). */
@@ -916,7 +970,7 @@ const BROWSE: Record<BrowseTable, { table: string; from: string; description: st
       ['id', 's.id'], ['kind', 's.kind'], ['name', 's.name'], ['qualified_name', 's.qualified_name'], ['signature', 's.signature'],
       ['path', 'f.path'], ['start_line', 's.start_line'], ['end_line', 's.end_line'], ['namespace', 's.namespace'],
       ['native_kind', 's.native_kind'], ['exported', 's.exported'], ['partial', 's.is_partial'], ['parent_id', 's.parent_id'],
-      ['merged_into', 's.merged_into'], ['doc', 's.doc'],
+      ['merged_into', 's.merged_into'], ['chars', 's.chars'], ['doc', 's.doc'],
     ],
   },
   imports: {

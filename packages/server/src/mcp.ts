@@ -3,11 +3,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import * as z from 'zod';
 import { existsSync } from 'node:fs';
 import { IndexDb } from '@refdex/core';
-import { MAX_BLAST_DEPTH, RefdexTools } from './tools.ts';
+import { DEFAULT_CONTEXT_TOKENS, MAX_BLAST_DEPTH, MAX_CONTEXT_TOKENS, RefdexTools } from './tools.ts';
 import { UsageLog } from './usage.ts';
 
 const INSTRUCTIONS = `RefDex is a method-level index of this workspace's Python, TypeScript, Java and C# code.
 Use it to find and read code instead of opening whole files:
+0. get_context first for any task that spans several files: one call returns the code the task needs
+   (bodies of the symbols it names, signatures of what they use and what uses them) within a token budget;
 1. get_repo_map for an overview of the most used code, when starting in unfamiliar code;
 2. search_symbols to find classes, methods and functions by name;
 3. get_file_outline to see a file's imports and signatures without its bodies;
@@ -108,6 +110,26 @@ export async function serveMcp(root: string, dbPath: string, version: string, op
   // Every tool is registered before connecting (the SDK can't add the capability later) and
   // disabled while the codebase is too small; disabled tools aren't listed.
   const registered = [
+    server.registerTool(
+      'get_context',
+      {
+        title: 'Get context for a task',
+        description:
+          'Call first for any task touching several files. Returns the code the task needs within a token budget: ' +
+          'bodies of the symbols it names, signatures of what they call and what calls them, grouped by file. ' +
+          'Then use the other tools only for follow-up detail.',
+        inputSchema: {
+          task: z.string().min(1).describe('The task in your words; name the classes and methods involved where you know them'),
+          budget: z.number().int().min(500).max(MAX_CONTEXT_TOKENS).optional().describe(`Token budget (default ${DEFAULT_CONTEXT_TOKENS})`),
+          seeds: z.array(z.string().min(1)).max(20).optional().describe('Qualified names to start from, besides the names in the task'),
+          changes: z.boolean().optional().describe('Also start from the symbols changed in the git working tree'),
+          depth: z.number().int().min(0).max(3).optional().describe('Hops over calls and inheritance from the starting symbols (default 2)'),
+        },
+        annotations: readOnly,
+      },
+      (args) => run('get_context', args, () => tools.getContext(args)),
+    ),
+
     server.registerTool(
       'search_symbols',
       {

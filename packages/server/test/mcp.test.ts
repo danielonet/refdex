@@ -31,10 +31,11 @@ describe('refdex mcp over stdio', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('announces instructions and five read-only tools', async () => {
-    assert.match(client.getInstructions() ?? '', /search_symbols/);
+  it('announces instructions and six read-only tools', async () => {
+    assert.match(client.getInstructions() ?? '', /get_context first/);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['find_references', 'get_file_outline', 'get_repo_map', 'get_symbol_source', 'search_symbols']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['find_references', 'get_context', 'get_file_outline', 'get_repo_map', 'get_symbol_source', 'search_symbols']);
+    assert.deepEqual(tools.find((t) => t.name === 'get_context')?.inputSchema.required, ['task']);
     assert.ok(tools.every((t) => t.annotations?.readOnlyHint));
     assert.deepEqual(tools.find((t) => t.name === 'search_symbols')?.inputSchema.required, ['query']);
   });
@@ -95,7 +96,7 @@ describe('refdex mcp: tools only where they pay off', () => {
   });
 
   it('offers them above the threshold, or when forced; never turns them off', async () => {
-    for (const [flags, count] of [[['--min-tokens', '10'], 5], [['--tools', 'always'], 5], [['--tools', 'never', '--min-tokens', '0'], 0]] as const) {
+    for (const [flags, count] of [[['--min-tokens', '10'], 6], [['--tools', 'always'], 6], [['--tools', 'never', '--min-tokens', '0'], 0]] as const) {
       const client = await connect(...flags);
       try {
         assert.equal((await client.listTools()).tools.length, count, flags.join(' '));

@@ -11,3 +11,7 @@ export {
 export { Indexer, type IndexSummary } from './indexer.ts';
 export { pageRank, type WeightedEdge } from './rank.ts';
 export { blastRadius, isTestPath, type BlastCaller, type BlastRadius, type UnlinkedCalls } from './blast.ts';
+export {
+  CHARS_PER_TOKEN, entryDoc, entryHeader, levelChars, packContext, seedsFromTask, tokens, withKind,
+  type ContextEntry, type ContextOptions, type Level, type PackedContext, type TaskSeeds,
+} from './context.ts';
