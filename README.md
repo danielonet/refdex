@@ -1,3 +1,5 @@
+![RefDex: understand your codebase](docs/images/refdex-banner.png)
+
 # RefDex
 
 [![VS Code Marketplace](https://vsmarketplacebadges.dev/version/danielonnet.refdex.svg?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=danielonnet.refdex)
