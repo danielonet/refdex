@@ -69,6 +69,20 @@ node packages/server/dist/refdex.cjs index --root /path/to/project   # writes /p
 
 Tools: `get_context` (the code a task needs, within a token budget), `get_repo_map`, `search_symbols`, `get_file_outline`, `get_symbol_source` (optionally `with_callees`), `find_references` (optionally `depth` for the blast radius: indirect callers and the tests that reach a symbol). In the IDEs you don't need this by hand: the VS Code extension registers RefDex with Copilot automatically, and "RefDex: Connect Claude Code…" adds it to Claude Code for the open project. In IntelliJ, **Tools | RefDex | Connect AI Client…** does the same for Claude Code, Junie and Copilot.
 
+### Debug builds: the MCP server over HTTP
+
+For testing the tools with curl instead of typing JSON-RPC into stdio, set `"debug": true` in [refdex.build.json](refdex.build.json) and rebuild (`npm run build`). The daemon bundles then include `refdex mcp --http <port>`: the same tools over MCP's Streamable HTTP transport, on `127.0.0.1` only, one stateless POST per request:
+
+```sh
+node packages/server/dist/refdex.cjs mcp --root /path/to/project --http 7337 --tools always
+
+curl -s http://127.0.0.1:7337/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_symbols","arguments":{"query":"OrderService"}}}' \
+  | jq -r '.result.content[0].text'
+```
+
+`tools/list` lists the tools; any other tool works like `search_symbols` above. Keep `"debug": false` for releases: the HTTP code is then left out of both bundles (about 190 KB), and `--http` says it needs a debug build. Running from source (`npm run dev`, the tests) always includes it.
+
 To run the extension, open `packages/vscode` in VS Code and press F5. To run the IntelliJ plugin in a sandbox IDE, run `./gradlew runIde` in `plugins/intellij`; it needs JDK 21, and its first build downloads the IntelliJ Platform SDK (about 1.5 GB).
 
 ## Scripts

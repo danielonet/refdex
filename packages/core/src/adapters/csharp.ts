@@ -1,6 +1,6 @@
 import type { Node } from 'web-tree-sitter';
 import type { ImportDecl } from '../model.ts';
-import { cleanDoc, extractReferences, extractSymbols } from './common.ts';
+import { cleanDoc, extractReferences, extractSymbols, type LocalTypes } from './common.ts';
 import type { LanguageAdapter } from './types.ts';
 
 const definitions = `
@@ -25,6 +25,7 @@ const name = '[(identifier) @name (generic_name (identifier) @name)]';
 const type = `[${name.slice(1, -1)} (qualified_name name: ${name})]`;
 const references = `
 (invocation_expression function: [${name.slice(1, -1)} (member_access_expression name: ${name})]) @call
+(invocation_expression function: (conditional_access_expression (member_binding_expression name: ${name}))) @call
 (object_creation_expression type: ${type}) @new
 (base_list ${type}) @extends
 (_ type: ${type}) @reference
@@ -34,6 +35,51 @@ const references = `
 `;
 
 const TYPE_KINDS = new Set(['class_declaration', 'struct_declaration', 'record_declaration', 'interface_declaration']);
+
+/** Fields' and properties' types and methods' return types. */
+function valueType(node: Node): string | undefined {
+  switch (node.type) {
+    case 'method_declaration': {
+      const returns = node.childForFieldName('returns');
+      return returns && returns.text !== 'void' ? returns.text : undefined;
+    }
+    case 'property_declaration':
+      return node.childForFieldName('type')?.text;
+    case 'field_declaration':
+    case 'event_field_declaration':
+      return node.namedChildren.find((c) => c.type === 'variable_declaration')?.childForFieldName('type')?.text;
+    default:
+      return undefined;
+  }
+}
+
+/** Parameters and local variables (also `foreach`, `catch`, `out Foo x`); `var x = new Foo()` counts as `Foo`. */
+const locals: LocalTypes = {
+  scopes: new Set([
+    'method_declaration', 'constructor_declaration', 'local_function_statement', 'lambda_expression', 'accessor_declaration',
+    'operator_declaration', 'conversion_operator_declaration', 'property_declaration',
+  ]),
+  declared(scope) {
+    const out = new Map<string, string>();
+    const add = (name: string | undefined, type: string | undefined) => {
+      if (name && type && type !== 'var' && !out.has(name)) out.set(name, type);
+    };
+    for (const d of scope.descendantsOfType(['parameter', 'variable_declaration', 'foreach_statement', 'catch_declaration', 'declaration_expression'])) {
+      const type = d.childForFieldName('type');
+      if (d.type === 'variable_declaration') {
+        // Fields are symbols, not locals; their variable_declaration sits in a field_declaration.
+        if (d.parent?.type === 'field_declaration' || d.parent?.type === 'event_field_declaration') continue;
+        for (const v of d.namedChildren.filter((c) => c.type === 'variable_declarator')) {
+          const created = v.namedChildren.find((c) => c.type === 'object_creation_expression');
+          add(v.childForFieldName('name')?.text, type?.type === 'implicit_type' ? created?.childForFieldName('type')?.text : type?.text);
+        }
+      } else {
+        add((d.childForFieldName('name') ?? d.childForFieldName('left'))?.text, type?.text);
+      }
+    }
+    return out;
+  },
+};
 
 export const csharpAdapter: LanguageAdapter = {
   languages: ['csharp'],
@@ -45,10 +91,11 @@ export const csharpAdapter: LanguageAdapter = {
       doc: xmlDocComment,
       exported: (node) => modifiers(node).includes('public'),
       partial: (node) => TYPE_KINDS.has(node.type) && modifiers(node).includes('partial'),
+      valueType,
     });
     return {
       language, symbols, imports: parseImports(tree.rootNode),
-      references: extractReferences(tree.rootNode, refs, symbols), hasErrors: tree.rootNode.hasError,
+      references: extractReferences(tree.rootNode, refs, symbols, locals), hasErrors: tree.rootNode.hasError,
     };
   },
 

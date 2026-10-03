@@ -22,6 +22,11 @@ export interface ExtractedSymbol {
   exported: boolean;
   /** C# `partial` type; parts in several files are merged after indexing. */
   partial: boolean;
+  /**
+   * Declared type of the symbol's value, as written: a field's or property's type, a method's return
+   * type (`Segment<K, V>`). Java and C# only; lets calls on it be linked (`segmentFor(h).put()`).
+   */
+  valueType?: string;
   parent?: ExtractedSymbol;
 }
 
@@ -73,6 +78,11 @@ export interface ExtractedReference {
   line: number;
   /** Innermost enclosing symbol; undefined at module level. */
   from?: ExtractedSymbol;
+  /**
+   * Declared type of the qualifier's first name when it is a parameter or local variable
+   * (`ByteSource source; source.copyTo(sink)` -> `ByteSource`). Java and C# only.
+   */
+  receiverType?: string;
 }
 
 export interface ParsedFile {

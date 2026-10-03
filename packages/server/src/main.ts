@@ -10,6 +10,13 @@ import { serve } from './serve.ts';
 import { wasmLoader } from './wasm.ts';
 import { runIndexWorker } from './worker.ts';
 
+/**
+ * Set by the bundler from refdex.build.json (scripts/build-flags.mjs). Undefined when running from
+ * source, which counts as a debug build. Check it inline where code is gated, so esbuild can drop
+ * the branch and what it imports from release bundles.
+ */
+declare const __REFDEX_DEBUG__: boolean | undefined;
+
 const VERSION = '0.0.1';
 
 const SELFTEST_SOURCES: Record<LanguageId, string> = {
@@ -24,6 +31,7 @@ const USAGE = `refdex ${VERSION}
 Usage:
   refdex serve --root <dir> [--db <file>]    daemon for IDE plugins (JSON lines on stdio, see serve.ts)
   refdex mcp --root <dir> [--db <file>]      MCP server (stdio) for Claude Code, Copilot and other AI clients
+       [--http <port>]                       debug builds only: serve it over HTTP on 127.0.0.1:<port>/mcp (curl)
   refdex index --root <dir> [--db <file>]    index a folder once; unchanged files are skipped
   refdex export <table> <out.csv> [--db <file>]  write files|symbols|imports|symbol_parts|edges as CSV
   refdex search <query> [--db <file>]        full-text search over symbol names
@@ -61,6 +69,7 @@ async function main(argv: string[]): Promise<number> {
       watch: { type: 'boolean', default: true },
       tools: { type: 'string' },
       'min-tokens': { type: 'string' },
+      http: { type: 'string' },
     },
     allowNegative: true,
   });
@@ -93,6 +102,17 @@ async function main(argv: string[]): Promise<number> {
       if (!Number.isFinite(minTokens) || minTokens < 0) {
         const source = opts['min-tokens'] !== undefined ? '--min-tokens' : 'REFDEX_MIN_TOKENS';
         throw new Error(`${source} must be a non-negative number, not "${rawMinTokens}"`);
+      }
+      if (opts.http !== undefined) {
+        // Debug builds only: in a release bundle this branch, and mcp-http.ts with it, is gone.
+        if (typeof __REFDEX_DEBUG__ === 'undefined' || __REFDEX_DEBUG__) {
+          const port = Number(opts.http);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`--http needs a port number, not ${opts.http}`);
+          const { serveMcpHttp } = await import('./mcp-http.ts');
+          await serveMcpHttp(root(), resolve(opts.db), VERSION, port, { tools, minTokens });
+          return -1; // keeps running until stopped
+        }
+        throw new Error('--http is only in debug builds: set "debug": true in refdex.build.json and rebuild');
       }
       await serveMcp(root(), resolve(opts.db), VERSION, { tools, minTokens });
       return -1; // keeps running until the client disconnects

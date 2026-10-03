@@ -119,7 +119,8 @@ describe('blast radius: unlinked calls', () => {
     const ix = await indexSources({
       'src/app/Builder.java': `package app;
 public class Builder {
-  public static Builder newBuilder() { return new Builder(); }
+  // Returns a type parameter: calls on its result can't be followed (a declared Builder could).
+  public static <T> T newBuilder() { return null; }
   public Builder recordStats() { return this; }
   public Builder configure() { return recordStats(); }
 }
@@ -127,10 +128,10 @@ public class Builder {
       'src/app/Use.java': `package app;
 public class Use {
   void chained() { Builder.newBuilder().recordStats(); }
-  void viaCaller(Builder b) { Builder.newBuilder().configure(); b.configure(); }
+  <B> void viaCaller(B b) { Builder.newBuilder().configure(); b.configure(); }
 }
 `,
-      // Another configure(), so `b.configure()` on an object of unknown type stays unlinked.
+      // Another configure(), so `b.configure()` on an object of unknown type (B) stays unlinked.
       'src/app/Other.java': 'package app;\npublic class Other { public void configure() {} }\n',
     });
     try {

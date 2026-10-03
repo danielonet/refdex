@@ -90,9 +90,30 @@ describe('MCP tools: typescript', () => {
 
   it('find_references lists linked uses with their caller before name matches', async () => {
     const out = await t.tools.findReferences({ qualified_name: 'src/models/order:OrderModel' });
-    assert.match(out, /1 use linked by the index.*:\nsrc\/services\/orderService\.ts:13: return new OrderModel\(\); {2}\[calls in src\/services\/orderService:OrderService\.find\]\n2 other lines naming "OrderModel"/s);
+    assert.match(out, /1 use linked by the index.*:\nsrc\/services\/orderService\.ts:13: return new OrderModel\(\); {2}\[calls in src\/services\/orderService:OrderService\.find\]\n/s);
+    // The caller's code, so the agent needn't fetch it next; it is short, so whole.
+    assert.match(out, /\nCode of the caller \(whole when short[^\n]*\n\/\/ src\/services\/orderService\.ts:12-14 {2}method src\/services\/orderService:OrderService\.find\n {2}find\(id: string\): Order \| undefined \{\n {4}return new OrderModel\(\);\n {2}\}\n2 other lines naming "OrderModel"/);
     const iface = await t.tools.findReferences({ qualified_name: 'src/models/order:Order' });
     assert.match(iface, /src\/models\/order\.ts:8: export class OrderModel implements Order \{ {2}\[implements in src\/models\/order:OrderModel\]/);
+  });
+
+  it('get_symbol_source reads several symbols in one call', async () => {
+    const out = await t.tools.getSymbolSource({ qualified_names: ['src/models/order:OrderModel.total', 'src/util:helper', 'Nope'] });
+    assert.equal(out.match(/^\[RefDex index/gm)?.length, 1, 'one freshness line');
+    assert.match(out, /\/\/ src\/models\/order\.ts:11-13 {2}method src\/models\/order:OrderModel\.total\n {2}total\(\): number \{/);
+    assert.match(out, /\/\/ src\/util\.ts:\d+(-\d+)? {2}function src\/util:helper\n/);
+    assert.match(out, /\/\/ Nope: No symbol "Nope"/);
+    assert.match(await t.tools.getSymbolSource({}), /Pass qualified_name, or several names in qualified_names/);
+    assert.match(await t.tools.getSymbolSource({ qualified_names: Array.from({ length: 11 }, (_, i) => `n${i}`) }), /At most 10 names/);
+  });
+
+  it('search_symbols includes the code of a single exact match, not of a type', async () => {
+    const one = await t.tools.searchSymbols({ query: 'libFn' });
+    assert.match(one, /\n\n\/\/ the only exact match, packages\/lib\/src\/index\.ts:1-3:\nexport function libFn\(\): string \{/);
+    // src/util.ts was edited by an earlier test: the snippet says its lines may have shifted.
+    assert.match(await t.tools.searchSymbols({ query: 'helper' }), /the only exact match, src\/util\.ts:1-1 \(file changed since it was indexed/);
+    assert.doesNotMatch(await t.tools.searchSymbols({ query: 'OrderModel' }), /the only exact match/);
+    assert.doesNotMatch(await t.tools.searchSymbols({ query: 'total' }), /the only exact match/, 'two methods named total');
   });
 
   it('get_symbol_source with_callees lists what the symbol calls', async () => {
@@ -167,17 +188,22 @@ describe('MCP tools: python, java, csharp', () => {
       'src/main/java/app/Service.java':
         'package app;\npublic class Service {\n  private final Store store;\n  public Service(Store store) { this.store = store; }\n  public void put(String key) { store.save(key); }\n}\n',
       'src/main/java/app/Api.java':
-        'package app;\npublic class Api {\n  private Service service;\n  public void handle() { service.put("x"); }\n  public void fresh() { make().put("y"); }\n  private Service make() { return service; }\n}\n',
+        // make() returns a type parameter, so make().put can't be followed; current() declares Service, so it can.
+        'package app;\npublic class Api {\n  private Service service;\n  public void handle() { service.put("x"); }\n  public void fresh() { make().put("y"); }\n  private <T> T make() { return null; }\n  public void typed() { current().put("z"); }\n  private Service current() { return service; }\n}\n',
       'src/test/java/app/ServiceTest.java':
         'package app;\npublic class ServiceTest {\n  void testPut() {\n    Service service = new Service(new DiskStore());\n    service.put("k");\n  }\n}\n',
     });
     try {
-      const plain = await t.tools.findReferences({ qualified_name: 'app.DiskStore.save' });
+      const plain = await t.tools.findReferences({ qualified_name: 'app.DiskStore.save', depth: 1 });
       assert.doesNotMatch(plain, /Blast radius/);
+      // Without a depth: two levels of callers, which found every reachable answer on the benchmark.
+      const byDefault = await t.tools.findReferences({ qualified_name: 'app.DiskStore.save' });
+      assert.match(byDefault, /Blast radius: \d+ callers? up to 2 levels/);
       const out = await t.tools.findReferences({ qualified_name: 'app.DiskStore.save', depth: 3 });
-      assert.match(out, /Blast radius: 3 callers up to 3 levels, 1 of them in tests\./);
+      assert.match(out, /Blast radius: 4 callers up to 3 levels, 1 of them in tests\./);
       assert.match(out, /Level 1 \(direct callers\):\n {2}app\.Service\.put {2}src\/main\/java\/app\/Service\.java:5/);
-      assert.match(out, /Level 2:\n {2}app\.Api\.handle {2}src\/main\/java\/app\/Api\.java:4/);
+      // Both through a field (service.put) and a declared return value (current().put).
+      assert.match(out, /Level 2:\n {2}app\.Api\.handle {2}src\/main\/java\/app\/Api\.java:4\n {2}app\.Api\.typed {2}src\/main\/java\/app\/Api\.java:7/);
       assert.match(out, /Tests that reach it[^\n]*\n {2}src\/test\/java\/app\/ServiceTest\.java: testPut \(L2\)/);
       // Api.fresh calls Service.put on a call result: the walk can't follow it and says so.
       assert.match(out, /May be incomplete[^\n]*\n {2}app\.Service\.put: 1 call on a call result, e\.g\. src\/main\/java\/app\/Api\.java:5 make\(\)\.put\(…\)\nLevel 1/);
@@ -286,7 +312,7 @@ describe('MCP tools: get_context', () => {
 
   it('returns the named method with its code, and what it calls and what calls it', async () => {
     const out = await t.tools.getContext({ task: 'Change how Cart.total() adds tax' });
-    assert.match(out, /^\[RefDex index: 4 files, updated just now\]\nContext for the task within 4,000 tokens: \d+ symbols in 4 files/);
+    assert.match(out, /^\[RefDex index: 4 files, updated just now\]\nContext for the task within 1,500 tokens: \d+ symbols in 4 files/);
     assert.match(out, /Starting from src\/cart:Cart\.total\./);
     // The seed's body, re-indented under its header inside its class.
     assert.match(out, /\nsrc\/cart\.ts\n {2}4-15 class Cart\n(.*\n)* {4}11-14 method total\n {6}total\(\): number \{\n {8}const net/);
@@ -318,5 +344,38 @@ describe('MCP tools: get_context', () => {
     execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'files'], { cwd: t.root });
     await writeFile(join(t.root, 'src/pricing.ts'), files['src/pricing.ts'].replace('0.2', '0.25'));
     assert.match(await t.tools.getContext({ task: 'review my change', changes: true }), /Starting from src\/pricing:taxFor\./);
+  });
+});
+
+describe('MCP tools: get_context stays small', () => {
+  it('clamps larger budgets instead of failing, and shows mirrored copies once', async () => {
+    // Guava keeps an android/ copy of its sources: the same classes, packages and signatures twice.
+    const source = 'package app;\npublic class Cache {\n  public void refresh(String key) { load(key); }\n  void load(String key) {}\n}\n';
+    const t = await toolsFor({ 'pom.xml': '<project/>', 'src/app/Cache.java': source, 'android/src/app/Cache.java': source });
+    try {
+      const out = await t.tools.getContext({ task: 'How does Cache.refresh load a key?', budget: 12_000 });
+      assert.match(out, /Context for the task within 3,000 tokens/);
+      assert.equal(out.match(/public void refresh\(String key\)/g)?.length, 1, out);
+    } finally {
+      await t.cleanup();
+    }
+  });
+});
+
+describe('MCP tools: find_references shows the callers\' code', () => {
+  it('shows a long caller only around the call', async () => {
+    const filler = Array.from({ length: 40 }, (_, i) => `    int x${i} = ${i};`).join('\n');
+    const t = await toolsFor({
+      'pom.xml': '<project/>',
+      'src/app/Store.java': 'package app;\npublic class Store { public void save() {} }\n',
+      'src/app/Job.java': `package app;\npublic class Job {\n  void run(Store store) {\n${filler}\n    store.save();\n${filler}\n  }\n}\n`,
+    });
+    try {
+      const out = await t.tools.findReferences({ qualified_name: 'app.Store.save', depth: 1 });
+      // The call is on line 44 of a method spanning lines 3-85: two lines either side, not 83.
+      assert.match(out, /\/\/ src\/app\/Job\.java:3-85 {2}method app\.Job\.run \(around the call\)\n {2}\/\/ lines 42-46\n {4}int x38 = 38;\n {4}int x39 = 39;\n {4}store\.save\(\);\n {4}int x0 = 0;\n {4}int x1 = 1;$/);
+    } finally {
+      await t.cleanup();
+    }
   });
 });

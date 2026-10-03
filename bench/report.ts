@@ -6,7 +6,8 @@ import { join } from 'node:path';
 interface Run {
   task: string;
   kind: string;
-  arm: 'baseline' | 'refdex';
+  /** baseline, refdex, or directed (RefDex plus an instruction to use it; see run.ts). */
+  arm: string;
   passed: boolean;
   /** Share of expected items found (completeness tasks); absent in older results. */
   recall?: number;
@@ -39,6 +40,9 @@ const usd = (n: number) => `$${n.toFixed(3)}`;
 const pct = (n: number) => `${n > 0 ? '+' : ''}${(n * 100).toFixed(0)}%`;
 
 const tasks = [...new Set(runs.map((r) => r.task))];
+/** Setups in a fixed order; old results have only baseline and refdex. */
+const arms = ['baseline', 'refdex', 'directed'].filter((a) => runs.some((r) => r.arm === a));
+const withRefdex = arms.filter((a) => a !== 'baseline');
 /** Mean recall of runs, as a percentage; '-' for results without it. */
 const recallOf = (rs: Run[]) => (rs.some((r) => r.recall === undefined) ? '-' : `${Math.round((100 * rs.reduce((s, r) => s + r.recall!, 0)) / rs.length)}%`);
 const of = (task: string, arm: Run['arm']) => runs.filter((r) => r.task === task && r.arm === arm);
@@ -54,33 +58,49 @@ const out: string[] = [
   '| Task | Kind | Setup | Passed | Recall | False positives | Turns | Context tokens | Work tokens | Output tokens | Cost | RefDex calls |',
   '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
 ];
-const ratios: number[] = [];
+/** Per setup, per task: median cost relative to baseline. */
+const ratios = new Map<string, (number | undefined)[]>(withRefdex.map((a) => [a, []]));
 for (const task of tasks) {
-  for (const arm of ['baseline', 'refdex'] as const) {
+  for (const arm of arms) {
     const rs = of(task, arm);
     if (!rs.length) continue;
     out.push(`| ${task} | ${rs[0].kind} | ${arm} | ${rs.filter((r) => r.passed).length}/${rs.length} | ` +
       `${recallOf(rs)} | ${rs.every((r) => r.falsePositives === undefined) ? '-' : rs.map((r) => r.falsePositives ?? 0).join(', ')} | ${median(rs.map((r) => r.turns))} | ` +
       `${k(median(rs.map((r) => r.contextTokens)))} | ${k(median(rs.map((r) => r.workTokens ?? NaN)))} | ${median(rs.map((r) => r.outputTokens)).toFixed(0)} | ${usd(median(rs.map((r) => r.cost)))} | ` +
-      `${arm === 'refdex' ? median(rs.map((r) => r.refdexCalls)) : '-'} |`);
+      `${arm !== 'baseline' ? median(rs.map((r) => r.refdexCalls)) : '-'} |`);
   }
   const b = median(of(task, 'baseline').map((r) => r.cost));
-  const x = median(of(task, 'refdex').map((r) => r.cost));
-  if (b > 0 && x > 0) ratios.push(x / b);
+  for (const arm of withRefdex) {
+    const x = median(of(task, arm).map((r) => r.cost));
+    ratios.get(arm)!.push(b > 0 && x > 0 ? x / b : undefined);
+  }
 }
 
-const all = (arm: Run['arm']) => runs.filter((r) => r.arm === arm);
-const geo = ratios.length ? Math.exp(ratios.reduce((s, r) => s + Math.log(r), 0) / ratios.length) : NaN;
-const refdexRuns = all('refdex');
-out.push('', '## Summary', '',
-  `- **Cost with RefDex vs without:** ${pct(geo - 1)} (geometric mean of the per-task median ratios; negative is a saving). ` +
-    `Per task: ${tasks.map((t, i) => `${t} ${ratios[i] !== undefined ? pct(ratios[i] - 1) : 'n/a'}`).join(', ')}.`,
-  `- **Recall** (share of the expected answers found, mean over runs): baseline ${recallOf(all('baseline'))}, RefDex ${recallOf(refdexRuns)}; ` +
-    `false positives: baseline ${all('baseline').reduce((s, r) => s + (r.falsePositives ?? 0), 0)}, RefDex ${refdexRuns.reduce((s, r) => s + (r.falsePositives ?? 0), 0)}.`,
-  `- **Passed:** baseline ${all('baseline').filter((r) => r.passed).length}/${all('baseline').length}, RefDex ${refdexRuns.filter((r) => r.passed).length}/${refdexRuns.length}.`,
-  `- **RefDex used:** in ${refdexRuns.filter((r) => r.refdexCalls > 0).length} of ${refdexRuns.length} RefDex runs ` +
-    `(${refdexRuns.reduce((s, r) => s + r.refdexCalls, 0)} calls in total)${refdexRuns.some((r) => !r.refdexOffered) ? '; WARNING: some RefDex runs were not offered the tools' : ''}.`,
-  `- **Median wall time:** baseline ${(median(all('baseline').map((r) => r.ms)) / 1000).toFixed(0)} s, RefDex ${(median(refdexRuns.map((r) => r.ms)) / 1000).toFixed(0)} s.`,
+const all = (arm: string) => runs.filter((r) => r.arm === arm);
+const geo = (rs: (number | undefined)[]) => {
+  const xs = rs.filter((x): x is number => x !== undefined);
+  return xs.length ? Math.exp(xs.reduce((s, x) => s + Math.log(x), 0) / xs.length) : NaN;
+};
+const label = (arm: string) => (arm === 'refdex' ? 'RefDex' : arm === 'directed' ? 'RefDex, directed' : arm);
+const total = (arm: string, f: (r: Run) => number) => all(arm).reduce((s, r) => s + f(r), 0);
+out.push('', '## Summary', '');
+// Cost ratios need baseline runs in the same folder (e.g. not for `--arms directed` alone).
+for (const arm of arms.includes('baseline') ? withRefdex : []) {
+  const rs = ratios.get(arm)!;
+  out.push(`- **Cost, ${label(arm)} vs baseline:** ${pct(geo(rs) - 1)} (geometric mean of the per-task median ratios; negative is a saving). ` +
+    `Per task: ${tasks.map((t, i) => `${t} ${rs[i] !== undefined ? pct(rs[i]! - 1) : 'n/a'}`).join(', ')}.`);
+}
+if (arms.includes('directed')) {
+  out.push('- *directed* is RefDex with an instruction to use it (see `directedPrompt` in setup.json): what RefDex saves when used. ' +
+    'The gap to *refdex* is what the agent misses by not choosing it.');
+}
+out.push(
+  `- **Recall** (share of the expected answers found, mean over runs): ${arms.map((a) => `${label(a)} ${recallOf(all(a))}`).join(', ')}; ` +
+    `false positives: ${arms.map((a) => `${label(a)} ${total(a, (r) => r.falsePositives ?? 0)}`).join(', ')}.`,
+  `- **Passed:** ${arms.map((a) => `${label(a)} ${all(a).filter((r) => r.passed).length}/${all(a).length}`).join(', ')}.`,
+  ...withRefdex.map((a) => `- **RefDex used${a === 'refdex' ? '' : ` (${a})`}:** in ${all(a).filter((r) => r.refdexCalls > 0).length} of ${all(a).length} runs ` +
+    `(${total(a, (r) => r.refdexCalls)} calls in total)${all(a).some((r) => !r.refdexOffered) ? '; WARNING: some runs were not offered the tools' : ''}.`),
+  `- **Median wall time:** ${arms.map((a) => `${label(a)} ${(median(all(a).map((r) => r.ms)) / 1000).toFixed(0)} s`).join(', ')}.`,
   `- **Runs that started with a warm cache from an earlier run:** ${runs.filter((r) => r.warmStart).length} of ${runs.length} (their cost above is recomputed as if cold).`,
 );
 const errors = runs.filter((r) => r.error);

@@ -6,6 +6,7 @@ const TYPES = new Set<SymbolKind>(['class', 'interface', 'enum', 'type_alias']);
 /** What a call can land on: functions and methods, classes (Python `Order()`), properties holding functions. */
 const CALLABLE = new Set<SymbolKind>(['function', 'method', 'class', 'property', 'field']);
 const FIELDS = new Set<SymbolKind>(['property', 'field']);
+const METHODS = new Set<SymbolKind>(['method', 'function']);
 const SELF = new Set(['this', 'self', 'cls']);
 const BASE = new Set(['super', 'base']);
 const NAMESPACE_LANGUAGES = new Set<LanguageId>(['java', 'csharp']);
@@ -127,6 +128,12 @@ export class ReferenceResolver {
     if (module) return this.moduleMember(module, row.name, kinds, scope.language);
     const type = this.resolveTypePath(q, scope, from);
     if (type !== undefined) return this.member(type, row.name, kinds);
+    // A receiver whose type is declared (Java, C#): a typed parameter or local, a field, a method's
+    // return value, or a chain of them (`source.copyTo()`, `this.store.save()`, `segmentFor(h).put()`).
+    // Then the member is looked up on that type and its bases; if it isn't there (declared outside
+    // the index), the call stays unlinked rather than guessed.
+    const receiver = this.receiverType(q, row.receiver_type, scope, from);
+    if (receiver !== undefined) return this.member(receiver, row.name, kinds);
     // Call results and other expressions (`f().m()`, `a[0].m()`): nothing to go on.
     if (!/^[\w$]+(\.[\w$]+)*$/.test(q)) return undefined;
     // A capitalized name that isn't an indexed type is an external one (`String.join`, `Math.max`,
@@ -142,6 +149,44 @@ export class ReferenceResolver {
       for (const ns of scope.namespaces) for (const c of this.inNamespace(row.name, ns)) if (c.language === scope.language) visible.add(c);
     }
     return this.pickTopDeclaration([...visible].filter((c) => kinds.has(c.kind) && c.parent_id !== null && TYPES.has(this.ref(c.parent_id)?.kind as SymbolKind)));
+  }
+
+  /**
+   * The type a qualifier evaluates to, from declared types only: `rootType` for a parameter or local
+   * (recorded at extraction), else a field or method of the enclosing types, or a type name for a
+   * static call; then each further `.field` or `.method()` by its declared type. Undefined as soon as
+   * a step's type isn't known.
+   */
+  private receiverType(q: string, rootType: string | null, scope: FileScope, from: SymbolRef | undefined): number | undefined {
+    const segments = chainSegments(q);
+    if (!segments) return undefined;
+    const [first, ...rest] = segments;
+    let type: number | undefined;
+    if (first.newType) type = this.typeFromText(first.newType, scope, from);
+    else if (!first.call && SELF.has(first.name)) type = this.enclosingType(from);
+    else if (!first.call && rootType) type = this.typeFromText(rootType, scope, from);
+    else if (first.call) type = this.valueTypeOf(this.resolveName(first.name, METHODS, scope, from));
+    else type = this.valueTypeOf(this.resolveName(first.name, FIELDS, scope, from)) ?? this.resolveTypePath(first.name, scope, from);
+    for (const seg of rest) {
+      if (type === undefined) return undefined;
+      type = this.valueTypeOf(this.member(type, seg.name, seg.call ? METHODS : FIELDS));
+    }
+    return type;
+  }
+
+  /** The type a field, property or method's value is declared as, resolved where it is declared. */
+  private valueTypeOf(id: number | undefined): number | undefined {
+    const sym = id !== undefined ? this.ref(id) : undefined;
+    if (!sym?.value_type) return undefined;
+    const file = this.files!.get(sym.file_id);
+    if (!file) return undefined;
+    return this.typeFromText(sym.value_type, this.scope(sym.file_id, file.path, file.language), sym);
+  }
+
+  /** A declared type as written (`Segment<K, V>`, `Store?`, `com.acme.Util`) -> the indexed type. */
+  private typeFromText(text: string, scope: FileScope, from: SymbolRef | undefined): number | undefined {
+    const name = baseTypeName(text);
+    return name ? this.resolveTypePath(name, scope, from) : undefined;
   }
 
   /**
@@ -447,3 +492,63 @@ function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   if (list) list.push(value);
   else map.set(key, [value]);
 }
+
+/**
+ * A qualifier as a chain of names and calls, `a.b().c` -> a, b(), c; the first may be a constructor
+ * call (`new Foo()`). Undefined for anything else: indexing, casts, generic calls, literals.
+ */
+function chainSegments(q: string): { name: string; call: boolean; newType?: string }[] | undefined {
+  const s = q.replace(/\?\./g, '.').replace(/!/g, '');
+  const out: { name: string; call: boolean; newType?: string }[] = [];
+  let i = 0;
+  /** Skips a balanced `(...)` or `<...>` starting at i. */
+  const skip = (open: string, close: string) => {
+    for (let depth = 0; i < s.length; i++) {
+      if (s[i] === open) depth++;
+      else if (s[i] === close && --depth === 0) {
+        i++;
+        return true;
+      }
+    }
+    return false;
+  };
+  while (i < s.length) {
+    const isNew = !out.length && s.startsWith('new ', i);
+    if (isNew) i += 4;
+    const m = (isNew ? /^[\w$]+(?:\.[\w$]+)*/ : /^[\w$]+/).exec(s.slice(i));
+    if (!m) return undefined;
+    i += m[0].length;
+    if (s[i] === '<' && !skip('<', '>')) return undefined;
+    let call = false;
+    if (s[i] === '(') {
+      if (!skip('(', ')')) return undefined;
+      call = true;
+    }
+    if (isNew && !call) return undefined;
+    out.push(isNew ? { name: m[0], call: false, newType: m[0] } : { name: m[0], call });
+    if (i < s.length) {
+      if (s[i] !== '.') return undefined;
+      i++;
+    }
+  }
+  return out.length ? out : undefined;
+}
+
+/** `Segment<K, V>` -> `Segment`, `Store?` -> `Store`; undefined for arrays, `var` and primitives. */
+function baseTypeName(text: string): string | undefined {
+  let t = text.replace(/\s+/g, '').replace(/^@[\w$.]+(\([^)]*\))?/, '');
+  if (t.endsWith('[]') || t.endsWith('...')) return undefined;
+  // Generic arguments, innermost first.
+  for (let prev = ''; prev !== t;) {
+    prev = t;
+    t = t.replace(/<[^<>]*>/g, '');
+  }
+  t = t.replace(/\?$/, '');
+  if (!/^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/.test(t) || PRIMITIVES.has(t)) return undefined;
+  return t;
+}
+
+const PRIMITIVES = new Set([
+  'var', 'void', 'int', 'long', 'short', 'byte', 'char', 'boolean', 'float', 'double', // Java
+  'bool', 'string', 'object', 'decimal', 'uint', 'ulong', 'ushort', 'sbyte', 'nint', 'nuint', 'dynamic', // C#
+]);

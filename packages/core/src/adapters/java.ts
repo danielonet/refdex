@@ -1,6 +1,6 @@
 import type { Node } from 'web-tree-sitter';
 import type { ImportDecl } from '../model.ts';
-import { blockDocComment, extractReferences, extractSymbols } from './common.ts';
+import { blockDocComment, extractReferences, extractSymbols, type LocalTypes } from './common.ts';
 import type { LanguageAdapter } from './types.ts';
 
 const definitions = `
@@ -26,6 +26,39 @@ const references = `
 (type_identifier) @name @reference
 `;
 
+/** Fields' types and methods' return types (`Segment<K, V> segmentFor(int h)`). */
+function valueType(node: Node): string | undefined {
+  if (node.type === 'method_declaration' || node.type === 'field_declaration' || node.type === 'constant_declaration') {
+    const type = node.childForFieldName('type');
+    return type && type.type !== 'void_type' ? type.text : undefined;
+  }
+  return undefined;
+}
+
+/** Parameters and local variables; `var x = new Foo()` counts as `Foo`. */
+const locals: LocalTypes = {
+  scopes: new Set(['method_declaration', 'constructor_declaration', 'compact_constructor_declaration', 'lambda_expression', 'static_initializer']),
+  declared(scope) {
+    const out = new Map<string, string>();
+    const add = (name: string | undefined, type: string | undefined) => {
+      if (name && type && !out.has(name)) out.set(name, type);
+    };
+    for (const d of scope.descendantsOfType(['formal_parameter', 'local_variable_declaration', 'enhanced_for_statement', 'resource'])) {
+      const type = d.childForFieldName('type');
+      if (d.type === 'local_variable_declaration') {
+        for (const v of d.childrenForFieldName('declarator')) {
+          const value = v.childForFieldName('value');
+          const inferred = type?.text === 'var' ? (value?.type === 'object_creation_expression' ? value.childForFieldName('type')?.text : undefined) : type?.text;
+          add(v.childForFieldName('name')?.text, inferred);
+        }
+      } else {
+        add(d.childForFieldName('name')?.text, type?.text === 'var' ? undefined : type?.text);
+      }
+    }
+    return out;
+  },
+};
+
 export const javaAdapter: LanguageAdapter = {
   languages: ['java'],
   definitions,
@@ -35,10 +68,11 @@ export const javaAdapter: LanguageAdapter = {
     const symbols = extractSymbols(tree.rootNode, query, {
       doc: (node) => blockDocComment(node),
       exported: (node) => hasModifier(node, 'public'),
+      valueType,
     });
     return {
       language, symbols, imports: parseImports(tree.rootNode),
-      references: extractReferences(tree.rootNode, refs, symbols), hasErrors: tree.rootNode.hasError,
+      references: extractReferences(tree.rootNode, refs, symbols, locals), hasErrors: tree.rootNode.hasError,
     };
   },
 

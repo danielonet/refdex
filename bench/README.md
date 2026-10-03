@@ -22,7 +22,13 @@ node bench/report.ts bench/results/<run folder>
 - read-only tools only (`Read` and read-only shell commands such as `rg`), and no subagents, so every
   token is in the session's own usage.
 
-Runs alternate which setup goes first, so neither always runs after the other.
+A third setup, **directed** (`--arms baseline,refdex,directed`), is `refdex` plus one instruction appended to
+Claude Code's system prompt (`--append-system-prompt`, like a CLAUDE.md rule) telling the agent to use RefDex
+(find_references for callers and tests, search_symbols, get_symbol_source); the task prompt stays the same. It answers a different question: what RefDex
+saves when the agent uses it. In `refdex` the agent often doesn't, so the gap between the two is what better
+tool descriptions and instructions could win. `setup.json` records the instruction.
+
+Runs rotate which setup goes first, so none always runs after another.
 
 **Tokens, not the bill.** For every API call Claude Code reports uncached input, cache-write input,
 cache-read input and output. Their sum is the context the model processed, which prompt caching doesn't

@@ -9,6 +9,20 @@ import {
 } from '@refdex/core';
 
 const MAX_SEARCH_RESULTS = 50;
+/**
+ * Fewer turns, not smaller answers, is what saves tokens: every tool call re-sends the whole
+ * conversation (bench/, guava-long). So answers include the code the agent would fetch next.
+ */
+/** search_symbols shows the code of a single exact match up to this many lines. */
+const MAX_MATCH_LINES = 60;
+/** get_symbol_source: names per call, and lines for all of them together. */
+export const MAX_SOURCE_NAMES = 10;
+const MAX_BATCH_LINES = 600;
+/** find_references: callers whose code is shown, whole when this short, else around the call. */
+const MAX_CALLER_CODE = 5;
+const SHORT_CALLER_LINES = 25;
+const CALL_CONTEXT_LINES = 2;
+const MAX_CALLER_CODE_LINES = 150;
 const DEFAULT_MAX_LINES = 250;
 const MAX_REFERENCES = 80;
 const MAX_LINE_LENGTH = 160;
@@ -26,11 +40,17 @@ const MAX_BLAST_CALLERS = 2000;
 /** Callers listed with unlinked calls, besides the target. */
 const MAX_UNLINKED_CALLERS = 5;
 export const MAX_BLAST_DEPTH = 5;
+/**
+ * Callers and their callers, and the tests reaching them. On the Guava benchmark, depth 2 found
+ * every expected answer the graph can reach; 3-5 only made answers bigger (what stays missing are
+ * calls the index couldn't link, which no depth follows).
+ */
+export const DEFAULT_BLAST_DEPTH = 2;
 /** Rough characters per token for the repo map's budget. */
 const CHARS_PER_TOKEN = 4;
 const TYPE_KINDS = new Set(['class', 'interface', 'enum', 'type_alias']);
-export const DEFAULT_CONTEXT_TOKENS = 4000;
-export const MAX_CONTEXT_TOKENS = 50_000;
+export const DEFAULT_CONTEXT_TOKENS = 1500;
+export const MAX_CONTEXT_TOKENS = 3000;
 /** Tokens kept for get_context's header and savings line. */
 const CONTEXT_FRAME_TOKENS = 150;
 /** Symbols changed in the working tree that become seeds, at most. */
@@ -77,6 +97,19 @@ export class RefdexTools {
       const lines = [`${this.freshness(db)}\n${hits.length} match${hits.length === 1 ? '' : 'es'} for "${args.query}":`];
       for (const h of hits) lines.push(this.symbolLine(h));
       if (hits.length === limit) lines.push(`(first ${limit}; narrow the query or raise limit for more)`);
+      // One exact match is usually what the agent reads next: include its code (a small member,
+      // not a type) and save that call.
+      const query = args.query.trim();
+      const exact = hits.filter((h) => h.name === query || h.qualified_name === query);
+      const only = new Set(exact.map((h) => h.qualified_name)).size === 1 ? exact[0] : undefined;
+      if (only && !TYPE_KINDS.has(only.kind) && only.end_line - only.start_line < MAX_MATCH_LINES) {
+        const source = await readFile(only.path, 'utf8').catch(() => undefined);
+        if (source !== undefined) {
+          const stale = sha1(source) !== db.fileInfo(only.path)?.hash ? ' (file changed since it was indexed; lines may have shifted)' : '';
+          lines.push('', `// the only exact match, ${this.rel(only.path)}:${only.start_line}-${only.end_line}${stale}:`,
+            ...source.split(/\r?\n/).slice(only.start_line - 1, only.end_line));
+        }
+      }
       return lines.join('\n');
     });
   }
@@ -123,12 +156,39 @@ export class RefdexTools {
     return [`imports: ${imports.map((i) => i.spec).join(', ')}`];
   }
 
-  async getSymbolSource(args: { qualified_name: string; max_lines?: number; with_callees?: boolean }): Promise<string> {
+  async getSymbolSource(args: { qualified_name?: string; qualified_names?: string[]; max_lines?: number; with_callees?: boolean }): Promise<string> {
     return this.guard(async (db) => {
-      const found = this.findSymbols(db, args.qualified_name);
-      if (typeof found === 'string') return found;
+      const names = [...new Set([args.qualified_name, ...(args.qualified_names ?? [])].filter((n): n is string => !!n?.trim()))];
+      if (!names.length) throw new UserError('Pass qualified_name, or several names in qualified_names.');
+      if (names.length > MAX_SOURCE_NAMES) throw new UserError(`At most ${MAX_SOURCE_NAMES} names per call; split the list.`);
       const maxLines = args.max_lines ?? DEFAULT_MAX_LINES;
       const blocks: string[] = [];
+      const all: SymbolRow[] = [];
+      let budget = MAX_BATCH_LINES;
+      for (const name of names) {
+        const found = this.findSymbols(db, name);
+        if (typeof found === 'string') {
+          // Not found or ambiguous: say so in place, without repeating the freshness line.
+          if (names.length === 1) return found;
+          blocks.push(`// ${name}: ${found.replace(/^\[RefDex index[^\n]*\n/, '')}`);
+          continue;
+        }
+        if (budget <= 0) {
+          blocks.push(`// ${name}: not shown, this call already returned ${MAX_BATCH_LINES} lines; ask for it separately.`);
+          continue;
+        }
+        all.push(...found);
+        const before = blocks.length;
+        await this.sourceBlocks(db, found, Math.min(maxLines, budget), blocks);
+        for (const b of blocks.slice(before)) budget -= b.split('\n').length;
+      }
+      if (args.with_callees && all.length) blocks.push(this.calleesText(db, all));
+      return `${this.freshness(db)}\n${blocks.join('\n\n')}`;
+    });
+  }
+
+  /** The source of one name's declarations (overloads, partial-type parts), appended to `blocks`. */
+  private async sourceBlocks(db: IndexDb, found: SymbolRow[], maxLines: number, blocks: string[]): Promise<void> {
       // Overloads and the parts of a partial type share a qualified name: show each.
       const rows = found.flatMap((s) => {
         const parts = db.symbolParts(s.id);
@@ -161,9 +221,6 @@ export class RefdexTools {
           blocks.push(`${header}${stale}\n${lines.slice(0, maxLines).join('\n')}\n// … ${lines.length - maxLines} more lines (raise max_lines to see them)`);
         }
       }
-      if (args.with_callees) blocks.push(this.calleesText(db, found));
-      return `${this.freshness(db)}\n${blocks.join('\n\n')}`;
-    });
   }
 
   /** Signatures of what the symbols call, so the model needn't fetch each callee. */
@@ -224,6 +281,32 @@ export class RefdexTools {
         if (useLines.length < MAX_REFERENCES) useLines.push(`${this.rel(u.path)}:${u.line}: ${clip(code)}  [${u.type}${via}]`);
       }
 
+      // The callers' code, which the agent would otherwise fetch one call at a time: short callers
+      // whole, longer ones around the call.
+      const callerCode: string[] = [];
+      let codeLines = 0;
+      const byCaller = new Map<number, typeof uses>();
+      for (const u of uses) {
+        if (u.from_id === null || ids.includes(u.from_id) || u.from_start === null || u.from_end === null) continue;
+        if (!byCaller.has(u.from_id) && byCaller.size >= MAX_CALLER_CODE) continue;
+        byCaller.set(u.from_id, [...(byCaller.get(u.from_id) ?? []), u]);
+      }
+      for (const calls of byCaller.values()) {
+        const u = calls[0];
+        const lines = await linesOf(u.path);
+        if (!lines || codeLines >= MAX_CALLER_CODE_LINES) break;
+        const whole = u.from_end! - u.from_start! + 1 <= SHORT_CALLER_LINES;
+        const ranges = whole
+          ? [[u.from_start!, u.from_end!]]
+          : calls.slice(0, 2).map((c) => [Math.max(u.from_start!, c.line - CALL_CONTEXT_LINES), Math.min(u.from_end!, c.line + CALL_CONTEXT_LINES)]);
+        callerCode.push(`// ${this.rel(u.path)}:${u.from_start}-${u.from_end}  ${u.from_kind} ${u.from_qualified_name}${whole ? '' : ' (around the call)'}`);
+        for (const [a, b] of ranges) {
+          if (!whole) callerCode.push(`  // lines ${a}-${b}`);
+          callerCode.push(...lines.slice(a - 1, b));
+          codeLines += b - a + 1;
+        }
+      }
+
       // 2. Other lines naming it in files that can see it: imports, and uses the index couldn't
       //    link (values passed around, receivers of unknown type). The declaration line is skipped.
       const pattern = new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`);
@@ -258,6 +341,9 @@ export class RefdexTools {
         : 'No uses linked by the index.');
       out.push(...useLines);
       if (linked.size > useLines.length) out.push(`… ${linked.size - useLines.length} more`);
+      if (callerCode.length) {
+        out.push(`Code of ${byCaller.size === 1 ? 'the caller' : `${byCaller.size} callers`} (whole when short, else around the call; get_symbol_source for more):`, ...callerCode);
+      }
       if (otherTotal) {
         out.push(`${plural(otherTotal, 'other line')} naming "${name}" in files that import or share its module/namespace (imports, values passed around, calls on objects of unknown type; matched by name, so review):`);
         out.push(...other);
@@ -269,7 +355,7 @@ export class RefdexTools {
       } else if (!linked.size) {
         out.push('No other lines name it in the files that can see it.');
       }
-      const depth = Math.min(args.depth ?? 1, MAX_BLAST_DEPTH);
+      const depth = Math.min(args.depth ?? DEFAULT_BLAST_DEPTH, MAX_BLAST_DEPTH);
       if (depth > 1) out.push('', ...this.blastRadiusLines(db, ids, depth));
       return out.join('\n');
     });

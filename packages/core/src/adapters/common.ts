@@ -19,6 +19,16 @@ export interface ExtractOptions {
   partial?(node: Node): boolean;
   /** Final kind once the parent is known, e.g. Python function inside a class -> method. */
   kind?(kind: SymbolKind, parent: ExtractedSymbol | undefined): SymbolKind;
+  /** Declared type of a field, property or method's return value (see `ExtractedSymbol.valueType`). */
+  valueType?(node: Node): string | undefined;
+}
+
+/** Where a language declares parameters and local variables, for `ExtractedReference.receiverType`. */
+export interface LocalTypes {
+  /** Node types that bound them: methods, constructors, lambdas. */
+  scopes: Set<string>;
+  /** Parameters and local variables declared inside a scope node: name -> declared type as written. */
+  declared(scope: Node): Map<string, string>;
 }
 
 /**
@@ -50,6 +60,8 @@ export function extractSymbols(root: Node, query: Query, opts: ExtractOptions = 
       exported: false,
       partial: opts.partial?.(node) ?? false,
     };
+    const valueType = opts.valueType?.(node);
+    if (valueType) sym.valueType = collapse(valueType);
     nodes.set(sym, node);
     declarations.set(sym, { start: outer.startIndex, end: outer.endIndex, nameStart: nameNode.startIndex });
     symbols.push(sym);
@@ -100,7 +112,7 @@ const QUALIFIED_TYPE = new Set(['scoped_type_identifier', 'qualified_name', 'nes
  * Runs a references query (see `LanguageAdapter.references`) and attaches each use to the innermost
  * symbol whose declaration contains it. Names of the declarations themselves are skipped.
  */
-export function extractReferences(root: Node, query: Query, symbols: ExtractedSymbol[]): ExtractedReference[] {
+export function extractReferences(root: Node, query: Query, symbols: ExtractedSymbol[], locals?: LocalTypes): ExtractedReference[] {
   const declared = new Set<number>();
   for (const s of symbols) {
     const d = declarations.get(s);
@@ -128,6 +140,19 @@ export function extractReferences(root: Node, query: Query, symbols: ExtractedSy
   const stack: ExtractedSymbol[] = [];
   let next = 0;
   const out: ExtractedReference[] = [];
+  const declaredIn = new Map<number, Map<string, string>>();
+  /** The declared type of a parameter or local variable named `id`, seen from `at`: innermost scope first. */
+  const localType = (id: string, at: Node): string | undefined => {
+    if (!locals) return undefined;
+    for (let n = at.parent; n; n = n.parent) {
+      if (!locals.scopes.has(n.type)) continue;
+      let declared = declaredIn.get(n.id);
+      if (!declared) declaredIn.set(n.id, (declared = locals.declared(n)));
+      const type = declared.get(id);
+      if (type) return collapse(type);
+    }
+    return undefined;
+  };
   for (const [pos, { kind, name }] of [...uses].sort((a, b) => a[0] - b[0])) {
     while (next < scopes.length && declarations.get(scopes[next])!.start <= pos) {
       const start = declarations.get(scopes[next])!.start;
@@ -135,10 +160,14 @@ export function extractReferences(root: Node, query: Query, symbols: ExtractedSy
       stack.push(scopes[next++]);
     }
     while (stack.length && declarations.get(stack[stack.length - 1])!.end <= pos) stack.pop();
+    const qualifier = qualifierOf(name);
+    const root = qualifier && /^([A-Za-z_$][\w$]*)(?=\.|\?\.|$)/.exec(qualifier)?.[1];
+    const receiverType = root && !RECEIVER_KEYWORDS.has(root) ? localType(root, name) : undefined;
     out.push({
       type: EDGE_TYPE[kind],
       name: name.text,
-      qualifier: qualifierOf(name),
+      qualifier,
+      ...(receiverType ? { receiverType } : {}),
       instantiates: kind === 'new',
       line: name.startPosition.row + 1,
       from: stack[stack.length - 1],
@@ -147,11 +176,22 @@ export function extractReferences(root: Node, query: Query, symbols: ExtractedSy
   return out;
 }
 
+/** Qualifier roots that aren't variables. */
+const RECEIVER_KEYWORDS = new Set(['this', 'self', 'cls', 'super', 'base', 'new']);
+
 function qualifierOf(name: Node): string | undefined {
   const node = name.parent && GENERIC.has(name.parent.type) ? name.parent : name;
+  // C# `a?.M()`: the member binds to the expression before `?.`.
+  if (node.parent?.type === 'member_binding_expression' && node.parent.parent?.type === 'conditional_access_expression') {
+    const condition = node.parent.parent.childForFieldName('condition');
+    return condition ? truncate(condition.text.replace(/\s+/g, ''), MAX_QUALIFIER) : undefined;
+  }
   const access = node.parent;
   if (!access || !MEMBER_ACCESS.has(access.type)) return undefined;
-  const text = access.text.slice(0, node.startIndex - access.startIndex).replace(/\s+/g, '').replace(/(\?\.|\.|::|->)$/, '');
+  // Whitespace goes, except the space after `new`, so `new Foo().m()` stays `new Foo()`, not a
+  // call to a method named `newFoo`.
+  const text = access.text.slice(0, node.startIndex - access.startIndex)
+    .replace(/\bnew\s+/g, 'new\u0000').replace(/\s+/g, '').replace(/new\u0000/g, 'new ').replace(/(\?\.|\.|::|->)$/, '');
   return text ? truncate(text, MAX_QUALIFIER) : undefined;
 }
 

@@ -193,9 +193,19 @@ export function packContext(db: IndexDb, seedIds: number[], opts: ContextOptions
     for (let p = parentOf.get(s.id); p; p = parentOf.get(p.id)) if (p.kind === 'method' || p.kind === 'function') return true;
     return false;
   };
+  // Mirrored source trees (Guava's android/ copy of guava/) declare the same symbol twice: keep the
+  // best-ranked copy, or the context spends its budget saying everything twice.
+  const copies = new Set<string>();
+  const firstCopy = (s: SymbolRow) => {
+    const key = `${s.qualified_name}\0${s.signature}`;
+    if (copies.has(key)) return false;
+    copies.add(key);
+    return true;
+  };
   const ranked = [...hops.keys()].map((id) => byId.get(id)!)
     .filter((s) => s.kind !== 'namespace' && s.kind !== 'module' && !nested(s))
     .sort((a, b) => score(b) - score(a) || (hops.get(a.id)! - hops.get(b.id)!) || a.id - b.id)
+    .filter(firstCopy)
     .slice(0, MAX_CANDIDATES);
 
   // 4. Levels and their costs. Every shown member brings its enclosing types at level 1 at least,

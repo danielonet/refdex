@@ -12,7 +12,7 @@ const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof impor
  * simply rebuilt. 6: calls through an interface or base method, and single-member static imports.
  * 7: characters of source per symbol, for get_context's token budget.
  */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 // Few indexes on edges: every save rewrites a file's edges. edges_to is partial because most edges
 // start (and many stay) unresolved; lookups by target imply NOT NULL, so SQLite still uses it.
@@ -49,6 +49,8 @@ CREATE TABLE symbols (
   is_partial INTEGER NOT NULL DEFAULT 0,
   -- Characters of source from start_line to end_line: what reading the symbol's code costs.
   chars INTEGER NOT NULL DEFAULT 0,
+  -- Declared type of a field or property, or a method's return type, as written (Java, C#).
+  value_type TEXT,
   -- Non-canonical part of a partial type: points at the canonical symbol (see symbol_parts).
   merged_into INTEGER REFERENCES symbols(id) ON DELETE SET NULL
 );
@@ -101,6 +103,8 @@ CREATE TABLE edges (
   type TEXT NOT NULL,             -- calls / extends / implements / references
   name TEXT NOT NULL,
   qualifier TEXT,                 -- this, self, super, a module alias, a type name, ...
+  -- Declared type of the qualifier's first name when it is a parameter or local variable (Java, C#).
+  receiver_type TEXT,
   instantiates INTEGER NOT NULL DEFAULT 0,
   line INTEGER NOT NULL,
   to_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL
@@ -160,6 +164,7 @@ export interface EdgeRow {
   type: EdgeType;
   name: string;
   qualifier: string | null;
+  receiver_type: string | null;
   instantiates: number;
   line: number;
   to_symbol_id: number | null;
@@ -171,6 +176,11 @@ export interface UseRow {
   line: number;
   type: EdgeType;
   from_qualified_name: string | null;
+  /** The using symbol, null at module level; with its kind and lines, to show its code. */
+  from_id: number | null;
+  from_kind: SymbolKind | null;
+  from_start: number | null;
+  from_end: number | null;
 }
 
 /** A resolved call into a symbol: the calling symbol (null for module-level code) and where. */
@@ -191,6 +201,8 @@ export interface SymbolRef {
   namespace: string | null;
   parent_id: number | null;
   language: LanguageId;
+  /** Declared type of a field, property or method's return value (see ExtractedSymbol.valueType). */
+  value_type: string | null;
 }
 
 export interface IndexStats {
@@ -328,8 +340,8 @@ export class IndexDb {
       fileId = Number(lastInsertRowid);
     }
     const insertSymbol = this.stmt(
-      `INSERT INTO symbols (file_id, kind, native_kind, name, qualified_name, namespace, signature, doc, start_line, end_line, parent_id, exported, is_partial, chars)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO symbols (file_id, kind, native_kind, name, qualified_name, namespace, signature, doc, start_line, end_line, parent_id, exported, is_partial, chars, value_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const lineStarts = [0];
     for (let i = source.indexOf('\n'); i !== -1; i = source.indexOf('\n', i + 1)) lineStarts.push(i + 1);
@@ -340,7 +352,7 @@ export class IndexDb {
       const parentId = s.parent ? (ids.get(s.parent) ?? null) : null;
       const { lastInsertRowid: id } = insertSymbol.run(
         fileId, s.kind, s.nativeKind, s.name, s.qualifiedName, s.namespace, s.signature, s.doc,
-        s.startLine, s.endLine, parentId, s.exported ? 1 : 0, s.partial ? 1 : 0, span(s.startLine, s.endLine),
+        s.startLine, s.endLine, parentId, s.exported ? 1 : 0, s.partial ? 1 : 0, span(s.startLine, s.endLine), s.valueType ?? null,
       );
       ids.set(s, Number(id));
     }
@@ -348,9 +360,9 @@ export class IndexDb {
     for (const i of parsed.imports) {
       insertImport.run(fileId, i.kind, i.spec, JSON.stringify(i.names), i.alias ?? null, i.global ? 1 : 0, i.line);
     }
-    const insertEdge = this.stmt('INSERT INTO edges (file_id, from_symbol_id, type, name, qualifier, instantiates, line) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    const insertEdge = this.stmt('INSERT INTO edges (file_id, from_symbol_id, type, name, qualifier, receiver_type, instantiates, line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     for (const r of parsed.references) {
-      insertEdge.run(fileId, r.from ? (ids.get(r.from) ?? null) : null, r.type, r.name, r.qualifier ?? null, r.instantiates ? 1 : 0, r.line);
+      insertEdge.run(fileId, r.from ? (ids.get(r.from) ?? null) : null, r.type, r.name, r.qualifier ?? null, r.receiverType ?? null, r.instantiates ? 1 : 0, r.line);
     }
     return fileId;
   }
@@ -384,7 +396,7 @@ export class IndexDb {
    * (a new declaration may be what they meant). `all`: every edge (a first index).
    */
   edgesToResolve(opts: { all?: boolean; fileIds: number[]; edgeIds: number[]; seeingFileIds: number[]; declaringFileIds: number[] }): EdgeRow[] {
-    const columns = 'e.id, e.file_id, e.from_symbol_id, e.type, e.name, e.qualifier, e.instantiates, e.line, e.to_symbol_id';
+    const columns = 'e.id, e.file_id, e.from_symbol_id, e.type, e.name, e.qualifier, e.receiver_type, e.instantiates, e.line, e.to_symbol_id';
     if (opts.all) return this.stmt(`SELECT ${columns} FROM edges e`).all() as unknown as EdgeRow[];
     // Collected step by step in a temp table: one OR-ed query makes SQLite scan every unresolved edge.
     this.db.exec(`CREATE TEMP TABLE IF NOT EXISTS pending_edges (id INTEGER PRIMARY KEY);
@@ -461,7 +473,7 @@ export class IndexDb {
   /** Symbols named `name` (partial types: the canonical part only). */
   symbolRefsNamed(name: string): SymbolRef[] {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.name = ? AND s.merged_into IS NULL ORDER BY s.id`,
     ).all(name) as unknown as SymbolRef[];
   }
@@ -474,7 +486,7 @@ export class IndexDb {
   /** Symbols named `name` declared directly in one of the given types (or type parts). */
   symbolRefsIn(name: string, parentIds: number[]): SymbolRef[] {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM json_each(?2) j JOIN symbols s INDEXED BY symbols_parent ON s.parent_id = j.value AND s.name = ?1 JOIN files f ON f.id = s.file_id
        WHERE s.merged_into IS NULL ORDER BY s.id`,
     ).all(name, JSON.stringify(parentIds)) as unknown as SymbolRef[];
@@ -482,14 +494,14 @@ export class IndexDb {
 
   symbolRefsInFile(name: string, fileId: number): SymbolRef[] {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM symbols s INDEXED BY symbols_file JOIN files f ON f.id = s.file_id WHERE s.file_id = ? AND s.name = ? AND s.merged_into IS NULL ORDER BY s.id`,
     ).all(fileId, name) as unknown as SymbolRef[];
   }
 
   symbolRefsInNamespace(name: string, namespace: string): SymbolRef[] {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM symbols s INDEXED BY symbols_namespace JOIN files f ON f.id = s.file_id WHERE s.namespace = ? AND s.name = ? AND s.merged_into IS NULL ORDER BY s.id`,
     ).all(namespace, name) as unknown as SymbolRef[];
   }
@@ -497,21 +509,21 @@ export class IndexDb {
   /** Every symbol (partial types: the canonical part only), for resolving a whole index at once. */
   allSymbolRefs(): SymbolRef[] {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.merged_into IS NULL ORDER BY s.id`,
     ).all() as unknown as SymbolRef[];
   }
 
   fileSymbolRefs(fileId: number): SymbolRef[] {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.file_id = ? ORDER BY s.id`,
     ).all(fileId) as unknown as SymbolRef[];
   }
 
   symbolRef(id: number): SymbolRef | undefined {
     return this.stmt(
-      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language
+      `SELECT s.id, s.file_id, s.kind, s.name, s.qualified_name, s.namespace, s.parent_id, f.language, s.value_type
        FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.id = ?`,
     ).get(id) as SymbolRef | undefined;
   }
@@ -536,7 +548,8 @@ export class IndexDb {
   /** Where the given symbols are used, according to the resolved edges. */
   uses(symbolIds: number[]): UseRow[] {
     return this.stmt(
-      `SELECT f.path, e.line, e.type, s.qualified_name AS from_qualified_name
+      `SELECT f.path, e.line, e.type, s.qualified_name AS from_qualified_name,
+         s.id AS from_id, s.kind AS from_kind, s.start_line AS from_start, s.end_line AS from_end
        FROM edges e JOIN files f ON f.id = e.file_id LEFT JOIN symbols s ON s.id = e.from_symbol_id
        WHERE e.to_symbol_id IN (SELECT value FROM json_each(?))
        ORDER BY f.path, e.line`,

@@ -234,3 +234,91 @@ public class Use { void run() { elementsEqual(); partition(); } }
     }
   });
 });
+
+describe('edges through declared types', () => {
+  it('java: parameters, locals, var, fields, return values and chains', async () => {
+    const ix = await indexSources({
+      'pom.xml': '<project/>',
+      'src/io/ByteSink.java': 'package io;\npublic abstract class ByteSink { public void write(byte[] b) {} }\n',
+      'src/io/FileSink.java': 'package io;\npublic class FileSink extends ByteSink { public void close() {} }\n',
+      'src/io/ByteSource.java': `package io;
+public class ByteSource {
+  public long copyTo(ByteSink sink) { return 0; }
+  public ByteSource slice(long from) { return this; }
+}
+`,
+      // Another copyTo, so without types a call on a variable is ambiguous.
+      'src/io/CharSource.java': 'package io;\npublic class CharSource { public long copyTo(ByteSink sink) { return 0; } }\n',
+      'src/cache/Segment.java': 'package cache;\nclass Segment<K, V> { V put(K key, V value) { return value; } }\n',
+      'src/cache/LocalCache.java': `package cache;
+import io.*;
+class LocalCache<K, V> {
+  Segment<K, V> segment;
+  ByteSource source;
+  Segment<K, V> segmentFor(int hash) { return segment; }
+  V put(K key, V value) { return segmentFor(key.hashCode()).put(key, value); }
+  void field() { segment.put(null, null); this.source.copyTo(null); }
+  void local(ByteSource in, FileSink out) {
+    in.copyTo(out);
+    var copy = new ByteSource();
+    copy.slice(1).copyTo(out);
+    out.write(null);
+    new ByteSource().copyTo(out);
+    for (ByteSource each : java.util.List.<ByteSource>of()) each.copyTo(out);
+  }
+  void external(java.io.InputStream stream) { stream.read(); }
+}
+`,
+    });
+    try {
+      const edges = ix.edges();
+      const count = (e: string) => edges.filter((x) => x === e).length;
+      // segmentFor(...).put: the return type; segment.put: the field's type.
+      assert.equal(count('cache.LocalCache.put -calls-> cache.Segment.put'), 1, edges.join('\n'));
+      assert.equal(count('cache.LocalCache.field -calls-> cache.Segment.put'), 1);
+      assert.equal(count('cache.LocalCache.field -calls-> io.ByteSource.copyTo'), 1);
+      // A parameter, a var, a chain through a method's return value, a new object, a for-each variable.
+      assert.equal(count('cache.LocalCache.local -calls-> io.ByteSource.copyTo'), 4);
+      assert.equal(count('cache.LocalCache.local -calls-> io.ByteSource.slice'), 1);
+      // A member inherited from a base type.
+      assert.equal(count('cache.LocalCache.local -calls-> io.ByteSink.write'), 1);
+      // CharSource.copyTo is never the target: the types say ByteSource.
+      assert.equal(edges.filter((e) => e.endsWith('io.CharSource.copyTo')).length, 0);
+      // A type outside the index: unlinked, not guessed.
+      assert.ok(!edges.some((e) => e.startsWith('cache.LocalCache.external')));
+    } finally {
+      await ix.cleanup();
+    }
+  });
+
+  it('csharp: parameters, var, out variables, properties and return values', async () => {
+    const ix = await indexSources({
+      'App.csproj': '<Project/>',
+      'Store.cs': 'namespace App;\npublic class Store { public void Save() {} }\npublic class Other { public void Save() {} }\n',
+      'Repo.cs': `namespace App;
+public class Repo {
+  public Store Items { get; set; }
+  Store current;
+  public Store Open(string name) => current;
+  bool TryGet(out Store s) { s = current; return true; }
+  void Use(Store store) {
+    store.Save();
+    var made = new Store();
+    made.Save();
+    Items.Save();
+    current?.Save();
+    Open("x").Save();
+    if (TryGet(out Store found)) found.Save();
+  }
+}
+`,
+    });
+    try {
+      const edges = ix.edges();
+      assert.equal(edges.filter((e) => e === 'App.Repo.Use -calls-> App.Store.Save').length, 6, edges.join('\n'));
+      assert.ok(!edges.some((e) => e.endsWith('App.Other.Save')));
+    } finally {
+      await ix.cleanup();
+    }
+  });
+});

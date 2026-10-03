@@ -1,0 +1,4 @@
+{
+  "$comment": "Build-time switches, read by packages/server/scripts/build.mjs and packages/vscode/esbuild.js. debug: true builds in debug-only features (refdex mcp --http). Keep false for releases: the debug code is then left out of the bundles entirely.",
+  "debug": false
+}

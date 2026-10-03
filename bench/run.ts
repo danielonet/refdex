@@ -3,7 +3,7 @@
 //
 // Usage (from the repository root):
 //   node bench/run.ts --tasks bench/tasks/guava.json --source ~/git/guava [--runs 3]
-//     [--model claude-sonnet-5] [--only task-id,task-id] [--arms baseline,refdex]
+//     [--model claude-sonnet-5] [--only task-id,task-id] [--arms baseline,refdex,directed]
 //
 // Writes bench/results/<timestamp>/runs.jsonl (one line per run) and the raw transcripts beside it;
 // `node bench/report.ts <that folder>` summarizes them.
@@ -17,13 +17,24 @@ import { grade, type AnswerKey } from './grade.ts';
 const REPO = resolve(import.meta.dirname, '..');
 const WORK = join(REPO, 'bench', 'work');
 const RUN_TIMEOUT_MS = 15 * 60_000;
-/** Same for both setups; RefDex isn't mentioned, as in real use. */
+/** Same for every setup; RefDex isn't mentioned in the task, as in real use. */
 const PROMPT_SUFFIX = '\n\nThis is a read-only question: do not change any files. End your reply with one line: ANSWER: <your answer>, with only the answer on that line (no explanation)';
 /** Read-only tools. Subagents are off, so every token is in the session's own usage. */
 const ALLOWED = ['Read', 'Bash(rg:*)', 'Bash(grep:*)', 'Bash(find:*)', 'Bash(ls:*)', 'Bash(cat:*)', 'Bash(head:*)', 'Bash(tail:*)', 'Bash(sed -n:*)', 'Bash(wc:*)', 'mcp__refdex__*'];
 const DISALLOWED = ['Agent', 'Task', 'Edit', 'Write', 'NotebookEdit'];
+/**
+ * The `directed` setup: RefDex as in `refdex`, plus this line appended to Claude Code's system prompt
+ * (like a CLAUDE.md rule). It measures what RefDex saves when the agent uses it, apart from whether
+ * the agent chooses to: the gap between `refdex` and `directed` is the discoverability problem.
+ */
+const DIRECTED_PROMPT =
+  'This workspace has RefDex, a code index served over MCP (tools named mcp__refdex__*). Use it to find and read code ' +
+  'instead of opening whole files: find_references for callers, the tests that reach a symbol and what a change ' +
+  'affects; search_symbols to find names; get_symbol_source to read one symbol. ' +
+  'Read files directly only for what RefDex\'s answers don\'t cover.';
 
-type Arm = 'baseline' | 'refdex';
+const ARMS = ['baseline', 'refdex', 'directed'] as const;
+type Arm = (typeof ARMS)[number];
 
 interface Task extends AnswerKey {
   id: string;
@@ -47,6 +58,7 @@ const suite = JSON.parse(readFileSync(opts.tasks, 'utf8')) as { commit: string; 
 const only = opts.only?.split(',');
 const tasks = suite.tasks.filter((t) => !only || only.includes(t.id));
 const arms = opts.arms!.split(',') as Arm[];
+for (const arm of arms) if (!ARMS.includes(arm)) throw new Error(`unknown setup ${arm}; use ${ARMS.join(', ')}`);
 const runs = Number(opts.runs);
 pricesFor(opts.model!); // fail before any session for a model without prices
 const name = basename(opts.tasks, '.json');
@@ -64,9 +76,10 @@ const daemon = join(REPO, 'packages', 'server', 'dist', 'refdex.cjs');
 if (!existsSync(daemon)) throw new Error(`${daemon} is missing; run \`npm run build -w @refdex/server\``);
 const db = join(WORK, `${repoName}.index.db`);
 execFileSync(process.execPath, [daemon, 'index', '--root', tree, '--db', db], { stdio: 'inherit' });
-const configs: Record<Arm, string> = { baseline: join(WORK, 'mcp-baseline.json'), refdex: join(WORK, `mcp-refdex-${repoName}.json`) };
+const refdexConfig = join(WORK, `mcp-refdex-${repoName}.json`);
+const configs: Record<Arm, string> = { baseline: join(WORK, 'mcp-baseline.json'), refdex: refdexConfig, directed: refdexConfig };
 writeFileSync(configs.baseline, JSON.stringify({ mcpServers: {} }));
-writeFileSync(configs.refdex, JSON.stringify({
+writeFileSync(refdexConfig, JSON.stringify({
   mcpServers: { refdex: { type: 'stdio', command: process.execPath, args: [daemon, 'mcp', '--root', tree, '--db', db, '--tools', 'always'] } },
 }));
 
@@ -74,6 +87,7 @@ const out = join(REPO, 'bench', 'results', `${new Date().toISOString().replace(/
 mkdirSync(join(out, 'transcripts'), { recursive: true });
 writeFileSync(join(out, 'setup.json'), JSON.stringify({
   suite: opts.tasks, commit: suite.commit, model: opts.model, runs, arms, tasks: tasks.map((t) => t.id),
+  ...(arms.includes('directed') ? { directedPrompt: DIRECTED_PROMPT } : {}),
   claude: execFileSync('claude', ['--version']).toString().trim(), refdex: execFileSync('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD']).toString().trim(),
 }, null, 2));
 
@@ -81,11 +95,18 @@ console.log(`${tasks.length} tasks x ${arms.length} setups x ${runs} runs = ${ta
 let n = 0;
 for (let run = 1; run <= runs; run++) {
   for (const [i, task] of tasks.entries()) {
-    // Alternate which setup goes first, so neither always follows the other.
-    const order = (run + i) % 2 === 0 ? arms : [...arms].reverse();
+    // Rotate which setup goes first, so none always follows another (with two, this alternates).
+    const shift = (run + i) % arms.length;
+    const order = shift === 0 ? arms : [...arms.slice(arms.length - shift), ...arms.slice(0, arms.length - shift)];
     for (const arm of order) {
       n++;
       const result = await runOnce(task, arm, run);
+      // A usage limit fails every later session at once; recording them would look like results.
+      if (result.rateLimited) {
+        console.error(`[${n}] ${task.id} ${arm} #${run}: stopped, usage limit reached (${result.answer}). ` +
+          `${n - 1} sessions recorded in ${out}; that session and the rest were not run.`);
+        process.exit(2);
+      }
       appendFileSync(join(out, 'runs.jsonl'), `${JSON.stringify(result)}\n`);
       console.log(`[${n}] ${task.id} ${arm} #${run}: ${result.passed ? 'pass' : 'FAIL'}, ${result.turns} turns, ` +
         `${Math.round(result.contextTokens / 1000)}k context + ${result.outputTokens} out, $${result.cost.toFixed(3)}, ${result.refdexCalls} RefDex calls`);
@@ -100,6 +121,7 @@ async function runOnce(task: Task, arm: Arm, run: number) {
     '-p', task.prompt + PROMPT_SUFFIX, '--model', opts.model!, '--output-format', 'stream-json', '--verbose',
     '--strict-mcp-config', '--mcp-config', configs[arm], '--setting-sources', '', '--no-session-persistence',
     '--allowedTools', ...ALLOWED, '--disallowedTools', ...DISALLOWED,
+    ...(arm === 'directed' ? ['--append-system-prompt', DIRECTED_PROMPT] : []),
   ];
   const started = Date.now();
   const lines: string[] = [];
@@ -172,6 +194,8 @@ function summarize(task: Task, arm: Arm, run: number, lines: string[], ms: numbe
     tools,
     ms,
     backgroundModels: Object.keys(final?.modelUsage ?? {}).filter((m) => m !== opts.model),
-    error: final ? (final.is_error ? final.subtype ?? 'error' : null) : 'no result (timeout or crash)',
+    error: final ? (final.is_error ? final.api_error_status ? `api error ${final.api_error_status}` : final.subtype ?? 'error' : null) : 'no result (timeout or crash)',
+    /** The API refused for a usage or rate limit (HTTP 429): the session never ran. */
+    rateLimited: final?.api_error_status === 429,
   };
 }

@@ -31,6 +31,12 @@ const esbuildProblemMatcherPlugin = {
  */
 async function daemonContext() {
 	const { WASM_MODULE_PATHS } = await import('@refdex/core');
+	// Build-time switches from refdex.build.json (debug: refdex mcp --http), shared with the server build.
+	const { buildFlags } = await import(require('url').pathToFileURL(require.resolve('@refdex/server/scripts/build-flags.mjs')).href);
+	const flags = buildFlags();
+	if (flags.debug) {
+		console.log('refdex.build.json: debug build (the bundled daemon includes refdex mcp --http)');
+	}
 	const wasmDir = path.join(__dirname, 'dist', 'daemon', 'wasm');
 	fs.mkdirSync(wasmDir, { recursive: true });
 	for (const [file, modulePath] of Object.entries(WASM_MODULE_PATHS)) {
@@ -47,7 +53,7 @@ async function daemonContext() {
 		target: 'node22',
 		outfile: 'dist/daemon/refdex.cjs',
 		// web-tree-sitter and @refdex/core use import.meta.url; shim it for CJS.
-		define: { 'import.meta.url': '__import_meta_url' },
+		define: { 'import.meta.url': '__import_meta_url', ...flags.define },
 		banner: { js: "const __import_meta_url = require('node:url').pathToFileURL(__filename).href;" },
 		logLevel: 'silent',
 		plugins: [esbuildProblemMatcherPlugin],
