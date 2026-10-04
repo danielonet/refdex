@@ -29,11 +29,11 @@ Every token an assistant spends reading irrelevant code is a token it can't spen
 | --- | --- | --- |
 | To find a class | Search, then open candidate files | `search_symbols`: name, signature, file and line |
 | To understand a file | Read the whole file | `get_file_outline`: imports and signatures, no bodies |
-| One method | Read the file it's in | `get_symbol_source`: just that method, read from disk |
-| Its callers, before a change | Text search and reading the matches | `find_references`: each use, with the method it's in |
-| The blast radius of a change | Following callers of callers by hand | `find_references` with `depth`: indirect callers level by level, and the tests that reach it |
+| A few methods | Read the files they're in | `get_symbol_source`: just those methods, several in one call, read from disk |
+| Its callers, before a change | Text search and reading the matches | `find_references`: each use with the method it's in, and the code of the first callers |
+| The blast radius of a change | Following callers of callers by hand | `find_references`: callers and their callers, and the tests that reach it, in one answer |
 | To get oriented in a new codebase | Browse folders and read files | `get_repo_map`: the most-used code, trimmed to a token budget |
-| Everything a task touches | Many searches and file reads, one by one | `get_context`: the code the task names, what it calls and what calls it, in one answer within a token budget |
+| A first overview of a task | Many searches and file reads, one by one | `get_context`: the code the task names and the signatures around it, in at most 3,000 tokens |
 
 For example, Guava's `CacheBuilder.java` is 1,148 lines, about **13,200 tokens** to read whole. Its outline costs about **1,100 tokens**, and one method about **140**. Outlines of very large files stay small: Guava's 5,000-line `LocalCache.java` (about 38,000 tokens) outlines in about 1,300. (Token counts are estimated at 4 characters per token.)
 
@@ -43,7 +43,20 @@ Smaller answers mean:
 - **More focused answers.** The context holds the code that matters, not everything near it.
 - **Fewer wrong guesses.** Signatures, callers and base classes come from the parsed code, not from skimming.
 
-**RefDex steps aside where it wouldn't pay off.** The tools have a fixed cost: their definitions, about 1,200 tokens, are sent with every request an assistant makes. On a small project, reading the files is cheaper. So RefDex offers its tools only once the indexed code reaches about 100,000 tokens (roughly 400 KB of source). Below that, Copilot doesn't start it and Claude Code sees no RefDex tools. The status bar shows which applies and why, and the `refdex.aiTools` settings change it.
+**Fewer round trips matter most.** Every tool call makes the assistant send the whole conversation again, so a question answered in fewer calls saves far more than a smaller answer. That's why RefDex's answers include what the assistant would ask for next: the callers' code with the list of callers, the code of a single exact search match, several symbols in one read.
+
+### Measured on a real codebase
+
+Claude Code (Claude Sonnet 5) answered questions about Google's Guava (3,275 Java files) with and without RefDex, three or five times each, and every answer was checked against the known one. The method and the full results are in the `bench/` folder of the RefDex repository.
+
+| Questions | Cost with RefDex | Correct answers |
+| --- | --- | --- |
+| Who calls a method, which tests reach it (4 tasks) | **12% less**; finding the tests that reach a method through helpers, 20–31% less | As many as without RefDex |
+| Tracing a flow, planning a change, understanding a large class (5 tasks) | About the same (2% more) | All correct, with and without |
+
+On the flow questions the assistant looks up one name after another, much as it would read files, and Claude Code spends one extra step loading RefDex's tool definitions the first time it uses them; together that cancels the savings there.
+
+**RefDex steps aside where it wouldn't pay off.** The tools have a fixed cost: their definitions, about 1,300 tokens, are sent with every request an assistant makes. On a small project, reading the files is cheaper. So RefDex offers its tools only once the indexed code reaches about 100,000 tokens (roughly 400 KB of source). Below that, Copilot doesn't start it and Claude Code sees no RefDex tools. The status bar shows which applies and why, and the `refdex.aiTools` settings change it.
 
 ## Built for large codebases
 
@@ -70,12 +83,12 @@ That's it. The assistant is told what the tools are for and uses them without be
 
 | Tool | What it answers |
 | --- | --- |
-| `get_context` | "What do I need for this task?": the bodies of the methods the task names, the signatures of what they call and what calls them, and the tests that reach them, packed into a token budget (default 4,000). Can also start from given names or from the symbols changed in git. Ends with how many tokens it saved over reading those files whole |
+| `get_context` | "Where do I start on this task?": a small overview of unfamiliar code, the bodies of the methods the task names and the signatures of what they call and what calls them, in a token budget (default 1,500, at most 3,000). Can also start from given names or from the symbols changed in git |
 | `get_repo_map` | "What matters in this codebase?": the most-used symbols with signatures, grouped by file, within a token budget; optionally for one folder |
-| `search_symbols` | "Where is X?": classes, functions, methods, properties and fields by name or prefix, filtered by kind or language |
+| `search_symbols` | "Where is X?": classes, functions, methods, properties and fields by name or prefix, filtered by kind or language. A single exact match comes with its code |
 | `get_file_outline` | "What's in this file?": imports (and where they resolve), plus every signature and line range, nested by class |
-| `get_symbol_source` | "Show me this code": one symbol's source from disk, every overload and partial-class part; `with_callees` adds what it calls |
-| `find_references` | "Who uses this?": calls, subclasses, implementations and type references, each with the calling method, plus imports. With `depth` (2–5), the blast radius: callers of the callers up to that many levels, including calls through the interfaces and base methods it implements, and the tests that reach it |
+| `get_symbol_source` | "Show me this code": the source of one or several symbols (up to 10 per call) from disk, every overload and partial-class part; `with_callees` adds what they call |
+| `find_references` | "Who uses this, and what breaks if I change it?": calls, subclasses, implementations and type references, each with the calling method and the code of the first callers, plus imports; then the blast radius: callers of the callers (two levels by default, `depth` up to 5), including calls through the interfaces and base methods it implements, and the tests that reach it. In Java and C#, calls are followed through declared types (`source.copyTo()` on a typed variable, `segmentFor(h).put()` on a method's return value) |
 
 Every tool is read-only, and each answer says how fresh the index is.
 
