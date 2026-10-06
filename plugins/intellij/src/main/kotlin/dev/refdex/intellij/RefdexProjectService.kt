@@ -12,6 +12,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.messages.Topic
 import dev.refdex.intellij.clients.ServerCommand
 import dev.refdex.intellij.daemon.DaemonClient
@@ -20,11 +21,16 @@ import dev.refdex.intellij.daemon.DaemonLocator
 import dev.refdex.intellij.daemon.DaemonNotFoundException
 import dev.refdex.intellij.daemon.IndexStats
 import dev.refdex.intellij.daemon.IndexSummary
+import dev.refdex.intellij.usage.UsageLog
+import dev.refdex.intellij.usage.UsageRecord
+import dev.refdex.intellij.usage.UsageSummary
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.text.NumberFormat
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * Everything tied to one project: its daemon, its index and its MCP command. The daemon keeps
@@ -42,6 +48,14 @@ class RefdexProjectService(private val project: Project) : Disposable {
 
     private var daemon: DaemonClient? = null
 
+    /** Tool calls AI clients made through RefDex, from the MCP server's usage log beside the index. */
+    @Volatile var usage: UsageSummary = UsageSummary()
+        private set
+    /** The latest tool call and when the IDE saw it, for the status bar's live activity. */
+    @Volatile private var lastCall: Pair<UsageRecord, Long>? = null
+    private val usageLog = UsageLog(dbPath.resolveSibling("mcp-usage.jsonl"))
+    private var usageWatch: ScheduledFuture<*>? = null
+
     sealed interface Status {
         data object Starting : Status
         data object Indexing : Status
@@ -58,6 +72,7 @@ class RefdexProjectService(private val project: Project) : Disposable {
      * error. Problems show in the status bar instead.
      */
     fun start() {
+        watchUsage()
         try {
             startDaemon()
         } catch (e: DaemonNotFoundException) {
@@ -133,6 +148,44 @@ class RefdexProjectService(private val project: Project) : Disposable {
         }
     }
 
+    /**
+     * Follows the usage log the MCP servers write (one per AI client session, in the clients' own
+     * processes): the totals once, then new calls every second. Checking the file's size is cheap.
+     */
+    private fun watchUsage() {
+        synchronized(this) {
+            if (usageWatch != null) return
+            usage = UsageSummary().with(runCatching { usageLog.readAll() }.getOrDefault(emptyList()))
+            usageWatch = AppExecutorUtil.getAppScheduledExecutorService()
+                .scheduleWithFixedDelay(::pollUsage, 1, 1, TimeUnit.SECONDS)
+        }
+        publish()
+    }
+
+    private fun pollUsage() {
+        val records = try {
+            usageLog.readNew()
+        } catch (e: Exception) {
+            LOG.debug("RefDex: could not read ${usageLog.path}", e)
+            return
+        }
+        if (records.isEmpty()) return
+        for (r in records) {
+            if (r.isCall) LOG.info("RefDex MCP: ${r.client} ${r.tool} ${r.args ?: ""} ${r.ms} ms, ${r.chars} chars${r.error?.let { ", failed: $it" }.orEmpty()}")
+            else if (r.event == "connect") LOG.info("RefDex MCP: ${r.client} ${r.clientVersion.orEmpty()} connected")
+        }
+        usage = usage.with(records)
+        records.lastOrNull { it.isCall }?.let { call ->
+            lastCall = call to System.currentTimeMillis()
+            // Back to the normal text once the activity has been shown.
+            AppExecutorUtil.getAppScheduledExecutorService().schedule(::publish, ACTIVITY_MS + 100, TimeUnit.MILLISECONDS)
+        }
+        publish()
+    }
+
+    /** The tool call made in the last few seconds, if any: the status bar shows it while it's fresh. */
+    fun activeCall(): UsageRecord? = lastCall?.takeIf { System.currentTimeMillis() - it.second < ACTIVITY_MS }?.first
+
     private fun refreshStats() {
         daemon?.stats()?.whenComplete { s, e ->
             if (e != null) return@whenComplete fail("could not read the index: ${e.cause?.message ?: e.message}")
@@ -205,6 +258,8 @@ class RefdexProjectService(private val project: Project) : Disposable {
 
     override fun dispose() {
         synchronized(this) {
+            usageWatch?.cancel(false)
+            usageWatch = null
             daemon?.stop()
             daemon = null
         }
@@ -218,6 +273,8 @@ class RefdexProjectService(private val project: Project) : Disposable {
         private val LOG = logger<RefdexProjectService>()
         const val NOTIFICATIONS = "RefDex"
         private const val OFFERED_KEY = "refdex.connectOffered"
+        /** How long the status bar shows a tool call. */
+        const val ACTIVITY_MS = 4000L
 
         @Topic.ProjectLevel
         val TOPIC = Topic(Listener::class.java, Topic.BroadcastDirection.NONE)

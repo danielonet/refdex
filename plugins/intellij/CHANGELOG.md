@@ -6,6 +6,8 @@ All notable changes to the RefDex plugin for IntelliJ-based IDEs are listed here
 
 ### Added
 
+- **See when AI assistants use RefDex.** For a few seconds after Claude Code, Junie, Copilot or another client calls a RefDex tool, the status bar shows the call (`find_references · Claude Code`) with a spinning icon. The widget also counts today's calls (`80 files · 14 calls today`), and a click shows today's calls and the tokens RefDex returned per client, plus the latest calls. Each call is also written to the IDE log.
+
 - **`get_context`: a small overview of the code a task touches.** Given the task in words, the AI gets the code of the methods it names and the signatures of what they call and what calls them, packed into a token budget (default 1,500, at most 3,000; larger requests are reduced, not refused). It can also start from names the AI passes, or from the symbols changed in git. Mirrored source trees (such as Guava's `android/` copy) are shown once.
 
 ### Changed
