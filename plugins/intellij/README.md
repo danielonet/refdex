@@ -7,8 +7,8 @@ shell: it starts the bundled `refdex serve` daemon for the project, shows the in
 | Piece | What it does |
 | --- | --- |
 | Daemon | Started when a project opens, with the index in the IDE's system directory (`<system>/refdex/<project>-<hash>/index.db`). It indexes the project on first use, then watches files. |
-| Status bar widget | `80 files · 14 calls today`, with symbols, imports, last index time and the AI tools decision in its tooltip. For a few seconds after an AI client calls a RefDex tool, it shows that call (`find_references · Claude Code`) with a spinning icon. A click shows today's calls and the tokens RefDex returned per client, and the latest calls, above the RefDex menu. It reads the `mcp-usage.jsonl` log that the MCP servers write beside the index, so it covers every connected client. |
-| Tools \| RefDex | Reindex Project, Rebuild Index, Connect AI Client…, Settings… |
+| Status bar widget | `80 files · 14 calls today`, with symbols, imports, last index time and the AI tools decision in its tooltip. For a few seconds after an AI client calls a RefDex tool, it shows that call (`find_references · Claude Code`) with a spinning icon. A click shows today's calls and the tokens RefDex returned per client, and the latest calls, above the RefDex menu. It reads the `mcp-usage.jsonl` log that the MCP servers write beside the index, so it covers every connected client. A dot beside the icon shows whether RefDex is connected to an AI client: green with a check when it is, red when it isn't. |
+| Tools \| RefDex | Reindex Project, Rebuild Index, Connect AI Client… (shown as "Connected: Claude Code…" once a client is connected), Settings… |
 | Settings \| Tools \| RefDex | Include/exclude globs, languages, file watching, when to offer the AI tools, and a daemon override |
 | Connect AI Client | Claude Code (local scope via its CLI, or the project's `.mcp.json`), Junie (`.junie/mcp/mcp.json`), GitHub Copilot (its global `mcp.json`, one entry per project; needs an IDE restart). For JetBrains AI Assistant, which has no config file other plugins can write, it copies a snippet to paste into its settings. |
 

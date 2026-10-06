@@ -56,6 +56,16 @@ class RefdexProjectService(private val project: Project) : Disposable {
     private val usageLog = UsageLog(dbPath.resolveSibling("mcp-usage.jsonl"))
     private var usageWatch: ScheduledFuture<*>? = null
 
+    /**
+     * The AI clients RefDex is registered with (their config entries), for the menu and the status
+     * bar's connection dot. Reading them touches files such as ~/.claude.json, so it is cached and
+     * refreshed in the background: at start, after connecting or disconnecting, when a client
+     * starts a session, and every [CONNECTIONS_MS] for changes made outside the IDE.
+     */
+    @Volatile var connectedClients: List<String> = emptyList()
+        private set
+    private var connectionWatch: ScheduledFuture<*>? = null
+
     sealed interface Status {
         data object Starting : Status
         data object Indexing : Status
@@ -73,6 +83,7 @@ class RefdexProjectService(private val project: Project) : Disposable {
      */
     fun start() {
         watchUsage()
+        watchConnections()
         try {
             startDaemon()
         } catch (e: DaemonNotFoundException) {
@@ -174,6 +185,8 @@ class RefdexProjectService(private val project: Project) : Disposable {
             if (r.isCall) LOG.info("RefDex MCP: ${r.client} ${r.tool} ${r.args ?: ""} ${r.ms} ms, ${r.chars} chars${r.error?.let { ", failed: $it" }.orEmpty()}")
             else if (r.event == "connect") LOG.info("RefDex MCP: ${r.client} ${r.clientVersion.orEmpty()} connected")
         }
+        // A client starting a session may have just been connected, e.g. from its own settings.
+        if (records.any { it.event == "connect" }) refreshConnections()
         usage = usage.with(records)
         records.lastOrNull { it.isCall }?.let { call ->
             lastCall = call to System.currentTimeMillis()
@@ -181,6 +194,32 @@ class RefdexProjectService(private val project: Project) : Disposable {
             AppExecutorUtil.getAppScheduledExecutorService().schedule(::publish, ACTIVITY_MS + 100, TimeUnit.MILLISECONDS)
         }
         publish()
+    }
+
+    private fun watchConnections() {
+        synchronized(this) {
+            if (connectionWatch != null) return
+            connectionWatch = AppExecutorUtil.getAppScheduledExecutorService()
+                .scheduleWithFixedDelay(::readConnections, 0, CONNECTIONS_MS, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    /** Re-reads which clients RefDex is registered with, e.g. right after connecting one. */
+    fun refreshConnections() {
+        ApplicationManager.getApplication().executeOnPooledThread(::readConnections)
+    }
+
+    private fun readConnections() {
+        val clients = try {
+            ClientSetup.forProject(this).connectedClients()
+        } catch (e: Exception) {
+            LOG.debug("RefDex: could not read the AI clients' configs", e)
+            return
+        }
+        if (clients != connectedClients) {
+            connectedClients = clients
+            publish()
+        }
     }
 
     /** The tool call made in the last few seconds, if any: the status bar shows it while it's fresh. */
@@ -260,6 +299,8 @@ class RefdexProjectService(private val project: Project) : Disposable {
         synchronized(this) {
             usageWatch?.cancel(false)
             usageWatch = null
+            connectionWatch?.cancel(false)
+            connectionWatch = null
             daemon?.stop()
             daemon = null
         }
@@ -275,6 +316,8 @@ class RefdexProjectService(private val project: Project) : Disposable {
         private const val OFFERED_KEY = "refdex.connectOffered"
         /** How long the status bar shows a tool call. */
         const val ACTIVITY_MS = 4000L
+        /** How often the AI clients' configs are re-read for the connection state. */
+        private const val CONNECTIONS_MS = 30_000L
 
         @Topic.ProjectLevel
         val TOPIC = Topic(Listener::class.java, Topic.BroadcastDirection.NONE)

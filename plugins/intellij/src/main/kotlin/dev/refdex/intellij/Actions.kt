@@ -37,6 +37,14 @@ class RebuildIndexAction : RefdexAction() {
 }
 
 class ConnectAiClientAction : RefdexAction() {
+    /** "Connected: Claude Code, Junie…" once RefDex is registered with a client; it still opens the same list. */
+    override fun update(e: AnActionEvent) {
+        super.update(e)
+        val clients = e.project?.takeIf { it.basePath != null }?.let { RefdexProjectService.getInstance(it).connectedClients }.orEmpty()
+        e.presentation.text = if (clients.isEmpty()) "Connect AI Client…" else "Connected: ${clients.joinToString(", ")}…"
+        e.presentation.icon = if (clients.isEmpty()) ConnectionDotIcon.NOT_CONNECTED else ConnectionDotIcon.CONNECTED
+    }
+
     override fun actionPerformed(e: AnActionEvent) {
         choose(e.project ?: return)
     }
@@ -93,6 +101,7 @@ class ConnectAiClientAction : RefdexAction() {
                 } catch (e: Exception) {
                     service.notify("${target.label}: ${e.message}", NotificationType.ERROR)
                 }
+                service.refreshConnections()
             }
         }
 

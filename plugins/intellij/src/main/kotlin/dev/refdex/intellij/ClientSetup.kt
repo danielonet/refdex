@@ -62,6 +62,10 @@ class ClientSetup private constructor(private val service: RefdexProjectService)
 
     fun anyConnected(): Boolean = targets.any { safely { it.connected } == true }
 
+    /** The clients RefDex is registered with, by name ("Claude Code" once, whether private or shared). */
+    fun connectedClients(): List<String> =
+        targets.filter { safely { it.connected } == true }.map { it.label.removeSuffix(" (shared)") }.distinct()
+
     /**
      * Rewrites existing entries that start another command, e.g. after a plugin update moved the
      * daemon or the AI tools settings changed. Never creates an entry the user did not ask for.

@@ -16,6 +16,8 @@ import com.intellij.openapi.wm.StatusBar
 import com.intellij.openapi.wm.StatusBarWidget
 import com.intellij.openapi.wm.StatusBarWidgetFactory
 import com.intellij.ui.AnimatedIcon
+import com.intellij.ui.RowIcon
+import com.intellij.util.ui.EmptyIcon
 import dev.refdex.intellij.usage.UsageRecord
 import dev.refdex.intellij.usage.UsageSummary
 import dev.refdex.intellij.usage.clientName
@@ -66,10 +68,19 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
         }
     }
 
-    override fun getIcon(): Icon = when {
-        service.activeCall() != null -> AnimatedIcon.Default.INSTANCE
-        service.status is RefdexProjectService.Status.Failed -> AllIcons.General.Warning
-        else -> RefdexIcons.Logo
+    /** The state icon, then a dot: green with a check when an AI client is connected, red when none is. */
+    override fun getIcon(): Icon {
+        val state = when {
+            service.activeCall() != null -> AnimatedIcon.Default.INSTANCE
+            service.status is RefdexProjectService.Status.Failed -> AllIcons.General.Warning
+            else -> RefdexIcons.Logo
+        }
+        val dot = if (service.connectedClients.isEmpty()) ConnectionDotIcon.NOT_CONNECTED else ConnectionDotIcon.CONNECTED
+        return RowIcon(3, com.intellij.ui.icons.RowIcon.Alignment.CENTER).apply {
+            setIcon(state, 0)
+            setIcon(EmptyIcon.create(2, 1), 1)
+            setIcon(dot, 2)
+        }
     }
 
     override fun getTooltipText(): String {
@@ -83,6 +94,7 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
             "${n.format(stats.resolvedImports)}/${n.format(stats.imports)} imports resolved<br>" +
             "Last indexed ${stats.indexedAt ?: "never"}<br>" +
             "AI tools ${if (tools.enabled) "on" else "off"}: ${tools.reason}<br>" +
+            connectionLine(service.connectedClients) + "<br>" +
             usageLines(service.usage).joinToString("<br>") { escape(it) } + "</html>"
     }
 
@@ -134,6 +146,11 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
             for (r in usage.recent) lines += "  ${timeOf(r)}  ${r.tool} · ${clientName(r.client)} · ~${n.format(r.tokens)} tokens${if (r.error != null) " · failed" else ""}"
             return lines
         }
+
+        /** Which AI clients RefDex is registered with, as the dot shows it. */
+        fun connectionLine(clients: List<String>): String =
+            if (clients.isEmpty()) "Not connected to an AI client: click, then Connect AI Client…"
+            else "Connected to ${clients.joinToString(", ")}"
 
         private fun calls(count: Int) = "${n.format(count)} call${if (count == 1) "" else "s"}"
 
