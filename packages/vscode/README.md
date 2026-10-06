@@ -6,6 +6,10 @@ RefDex indexes every class, method, function and property in your workspace into
 
 Supports **TypeScript, Python, Java and C#**. Setup happens inside VS Code, and your code never leaves your machine.
 
+If you use IntelliJ IDEA or another JetBrains IDE, you can get the RefDex plugin from the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/34561-refdex).
+
+[![Get RefDex from the JetBrains Marketplace](https://img.shields.io/jetbrains/plugin/v/34561?label=JetBrains%20Marketplace)](https://plugins.jetbrains.com/plugin/34561-refdex)
+
 ---
 
 ## What is RefDex?
@@ -54,7 +58,7 @@ Claude Code (Claude Sonnet 5) answered questions about Google's Guava (3,275 Jav
 | Who calls a method, which tests reach it (4 tasks) | **12% less**; finding the tests that reach a method through helpers, 20–31% less | As many as without RefDex |
 | Tracing a flow, planning a change, understanding a large class (5 tasks) | About the same (2% more) | All correct, with and without |
 
-On the flow questions the assistant looks up one name after another, much as it would read files, and Claude Code spends one extra step loading RefDex's tool definitions the first time it uses them; together that cancels the savings there.
+On the flow questions the assistant looks up one name after another, much as it would read files, and Claude Code spends one extra step loading RefDex's tool definitions the first time it uses them; together that cancels the savings there. Turning that loading off (Claude Code's `ENABLE_TOOL_SEARCH=false`) doesn't help: Claude Code then sends all of its own tool definitions with every request too, and the same questions cost about 60% more.
 
 **RefDex steps aside where it wouldn't pay off.** The tools have a fixed cost: their definitions, about 1,300 tokens, are sent with every request an assistant makes. On a small project, reading the files is cheaper. So RefDex offers its tools only once the indexed code reaches about 100,000 tokens (roughly 400 KB of source). Below that, Copilot doesn't start it and Claude Code sees no RefDex tools. The status bar shows which applies and why, and the `refdex.aiTools` settings change it.
 

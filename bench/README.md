@@ -49,8 +49,13 @@ cost ratios, so one expensive task doesn't dominate.
 
 - Claude Code defers MCP tool definitions: it lists their names and loads a definition with `ToolSearch`
   when the agent first uses a tool. RefDex's standing cost there is small (about 370 tokens per request),
-  but using it costs an extra turn. Clients that load definitions up front (Copilot) pay about 1,200
+  but using it costs an extra turn. Clients that load definitions up front (Copilot) pay about 1,300
   tokens per request instead.
+- `--tool-search off` runs every setup with `ENABLE_TOOL_SEARCH=false`, which loads all definitions up
+  front. That removes the `ToolSearch` turn, but Claude Code then also sends the full definitions of its
+  own deferred built-in tools, about 24,000 more tokens per request. On the long suite (2026-10-04) that
+  made every setup more expensive: baseline +53%, RefDex +62%, directed +71%, each against the default
+  baseline. So keep tool search on; the option is there to re-check this with new Claude Code versions.
 - The tasks are small, single questions. Savings, if any, should grow with longer sessions that read
   more code; a longer-task suite is the next step.
 - Results depend on the model, the Claude Code version and the repository; `setup.json` in each results

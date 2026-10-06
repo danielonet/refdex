@@ -50,7 +50,7 @@ const of = (task: string, arm: Run['arm']) => runs.filter((r) => r.task === task
 const out: string[] = [
   `# RefDex token benchmark: ${setup.tasks.length} tasks, ${setup.runs} runs per setup`,
   '',
-  `Model ${setup.model}, Claude Code ${setup.claude}, RefDex ${setup.refdex}, suite ${setup.suite} at ${setup.commit}.`,
+  `Model ${setup.model}, Claude Code ${setup.claude}${setup.toolSearch === 'off' ? ' with tool search off (ENABLE_TOOL_SEARCH=false)' : ''}, RefDex ${setup.refdex}, suite ${setup.suite} at ${setup.commit}.`,
   'Tokens are summed over every API call of a run (context = uncached + cache-write + cache-read input). Cost is priced',
   'with caching inside a run only (bench/cost.ts), so cache hits left by earlier runs don\'t count. Work tokens leave out',
   'what every call re-sends anyway (Claude Code\'s prompt, tools and the question): the context the task itself added. Medians per task.',

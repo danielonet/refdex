@@ -3,7 +3,7 @@
 //
 // Usage (from the repository root):
 //   node bench/run.ts --tasks bench/tasks/guava.json --source ~/git/guava [--runs 3]
-//     [--model claude-sonnet-5] [--only task-id,task-id] [--arms baseline,refdex,directed]
+//     [--model claude-sonnet-5] [--only task-id,task-id] [--arms baseline,refdex,directed] [--tool-search on|off]
 //
 // Writes bench/results/<timestamp>/runs.jsonl (one line per run) and the raw transcripts beside it;
 // `node bench/report.ts <that folder>` summarizes them.
@@ -50,6 +50,12 @@ const { values: opts } = parseArgs({
     model: { type: 'string', default: 'claude-sonnet-5' },
     only: { type: 'string' },
     arms: { type: 'string', default: 'baseline,refdex' },
+    /**
+     * Claude Code's tool search: `on` (its default) defers MCP tool definitions and loads them with a
+     * ToolSearch call on first use; `off` (ENABLE_TOOL_SEARCH=false) sends them with every request.
+     * Applies to every setup, so they stay identical apart from RefDex.
+     */
+    'tool-search': { type: 'string', default: 'on' },
   },
 });
 if (!opts.tasks || !opts.source) throw new Error('usage: node bench/run.ts --tasks <tasks.json> --source <repository> [--runs 3]');
@@ -60,6 +66,8 @@ const tasks = suite.tasks.filter((t) => !only || only.includes(t.id));
 const arms = opts.arms!.split(',') as Arm[];
 for (const arm of arms) if (!ARMS.includes(arm)) throw new Error(`unknown setup ${arm}; use ${ARMS.join(', ')}`);
 const runs = Number(opts.runs);
+const toolSearch = opts['tool-search'];
+if (toolSearch !== 'on' && toolSearch !== 'off') throw new Error(`--tool-search must be on or off, not ${toolSearch}`);
 pricesFor(opts.model!); // fail before any session for a model without prices
 const name = basename(opts.tasks, '.json');
 /** Worktree and index per repository, shared by its suites. */
@@ -88,6 +96,7 @@ mkdirSync(join(out, 'transcripts'), { recursive: true });
 writeFileSync(join(out, 'setup.json'), JSON.stringify({
   suite: opts.tasks, commit: suite.commit, model: opts.model, runs, arms, tasks: tasks.map((t) => t.id),
   ...(arms.includes('directed') ? { directedPrompt: DIRECTED_PROMPT } : {}),
+  toolSearch,
   claude: execFileSync('claude', ['--version']).toString().trim(), refdex: execFileSync('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD']).toString().trim(),
 }, null, 2));
 
@@ -126,7 +135,8 @@ async function runOnce(task: Task, arm: Arm, run: number) {
   const started = Date.now();
   const lines: string[] = [];
   await new Promise<void>((done) => {
-    const child = spawn('claude', args, { cwd: tree, stdio: ['ignore', 'pipe', 'pipe'] });
+    const env = toolSearch === 'off' ? { ...process.env, ENABLE_TOOL_SEARCH: 'false' } : process.env;
+    const child = spawn('claude', args, { cwd: tree, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const file = createWriteStream(transcript);
     let buffer = '';
     child.stdout.on('data', (chunk: Buffer) => {

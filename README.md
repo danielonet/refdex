@@ -23,12 +23,12 @@ The VS Code Marketplace page, with features, tools, commands and settings, is [p
 | --- | --- |
 | VS Code extension | Published on the VS Code Marketplace (0.1.3) |
 | IntelliJ plugin | 0.1.2 uploaded to the JetBrains Marketplace and waiting for JetBrains' review. Works in IntelliJ-based IDEs 2025.3 and later. Its zip bundles the daemon executable for Linux x64 only; on macOS and Windows it needs Node.js 22.13+ on PATH until CI builds those executables |
-| Token benchmark | First results on Guava below. Next: other languages' repositories, Copilot, and measuring Claude Code with its tool search off |
+| Token benchmark | First results on Guava below. Next: other languages' repositories and Copilot |
 | Open work | From Phase 5 of the plan: per-language fixture repos and a performance test on a large repo |
 
 ## Benchmark results
 
-Does RefDex make an AI agent spend fewer tokens on the same task? [bench/](bench/README.md) runs the same questions in Claude Code with and without RefDex and checks every answer against the known one. Latest runs, 2026-10-03: RefDex `2379014`, Claude Sonnet 5, Claude Code 2.1.283, Guava at `4d41665af1` (3,275 Java files, 79,884 symbols).
+Does RefDex make an AI agent spend fewer tokens on the same task? [bench/](bench/README.md) runs the same questions in Claude Code with and without RefDex and checks every answer against the known one. Latest runs, 2026-10-03 and 2026-10-04: RefDex `2379014` (the 2026-10-04 run records `3299659`, which changed only documentation), Claude Sonnet 5, Claude Code 2.1.283, Guava at `4d41665af1` (3,275 Java files, 79,884 symbols).
 
 Three setups, identical except for RefDex: **baseline** (no RefDex), **RefDex** (offered; the agent decides whether to use it, as in real use) and **directed** (RefDex plus one instruction to use it, which shows what it saves when used). Cost counts every token the model processed, priced as if nothing was cached before the run; the overall figure is the geometric mean of the per-task median ratios.
 
@@ -36,11 +36,13 @@ Three setups, identical except for RefDex: **baseline** (no RefDex), **RefDex** 
 | --- | --- | --- | --- | --- | --- |
 | [Callers and tests](bench/results/2026-10-03T18-54-44-guava-accuracy/report.md): 4 tasks | 3 per setup | **−12%** | **−12%** | 11/12, 10/12, 11/12 | 4 of 12 runs, 10 of 12 |
 | [Flows and plans](bench/results/2026-10-03T19-14-03-guava-long/report.md): 5 tasks | 5 per setup | +2% | +8% | 25/25 in all three | 6 of 25 runs, 18 of 25 |
+| [Flows and plans, tool search off](bench/results/2026-10-04T19-24-01-guava-long/report.md): 5 tasks | 5 per setup | +6% | +12% | 25/25 in all three | 20 of 25 runs, 22 of 25 |
 
 What the runs show:
 
 - **Turns, not answer size, decide the cost.** Each tool call re-sends the whole conversation (about 35,000 tokens per turn here). RefDex saves where one call replaces several rounds of searching: finding the tests that reach a method through helpers took 5–7 turns instead of 12 (−20% offered, −31% directed), and callers through a base type cost 19% less.
 - **On flow questions the gain is used up.** The agent looks names up one at a time, much as it reads files, and every session that uses RefDex spends one extra turn on Claude Code's `ToolSearch`, which loads deferred MCP tool definitions on first use. Searching several names per call would not help: the agent already makes most of its searches in parallel within a turn.
+- **Turning Claude Code's tool search off doesn't pay.** With `ENABLE_TOOL_SEARCH=false` (the third row, which applies it to every setup) the `ToolSearch` turn is gone, but Claude Code also sends the full definitions of its own deferred built-in tools, about 24,000 more tokens with every request. Against the default baseline, every setup got more expensive: baseline +53%, RefDex +62%, directed +71%. Keep tool search on. One side effect is telling, though: with every definition visible, the agent chose RefDex in 20 of 25 runs instead of 6.
 - **What changed to get here:** calls linked through declared types (Java, C#: 24% more calls linked on Guava, and `find_references` finds callers it missed before), `find_references` with two levels of callers and the callers' code by default and recommended first, `get_symbol_source` for several names, code with a single exact search match, and a smaller `get_context` (whose large answers had made flow questions 17–25% more expensive).
 
 Reproduce with `node bench/run.ts --tasks bench/tasks/guava-accuracy.json --source <guava checkout> --runs 3 --arms baseline,refdex,directed`, then `node bench/report.ts <results folder>`.

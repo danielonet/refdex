@@ -1,0 +1,22 @@
+{
+  "suite": "bench/tasks/guava-long.json",
+  "commit": "4d41665af1",
+  "model": "claude-sonnet-5",
+  "runs": 5,
+  "arms": [
+    "baseline",
+    "refdex",
+    "directed"
+  ],
+  "tasks": [
+    "refresh-flow",
+    "spec-new-option",
+    "transform-flow",
+    "cache-implementations",
+    "read-recency"
+  ],
+  "directedPrompt": "This workspace has RefDex, a code index served over MCP (tools named mcp__refdex__*). Use it to find and read code instead of opening whole files: find_references for callers, the tests that reach a symbol and what a change affects; search_symbols to find names; get_symbol_source to read one symbol. Read files directly only for what RefDex's answers don't cover.",
+  "toolSearch": "off",
+  "claude": "2.1.283 (Claude Code)",
+  "refdex": "3299659"
+}
