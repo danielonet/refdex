@@ -1,7 +1,6 @@
 package dev.refdex.intellij
 
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -88,24 +87,50 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
         val status = service.status
         if (status is RefdexProjectService.Status.Failed) return "RefDex: ${status.message}"
         val stats = service.stats?.takeIf { it.files > 0 } ?: return "RefDex has no index for this project yet. Click to build it."
-        val n = NumberFormat.getIntegerInstance()
         val tools = service.aiTools()
-        return "<html>RefDex: ${n.format(stats.files)} files, ${n.format(stats.symbols)} symbols, " +
-            "${n.format(stats.resolvedImports)}/${n.format(stats.imports)} imports resolved<br>" +
-            "Last indexed ${stats.indexedAt ?: "never"}<br>" +
-            "AI tools ${if (tools.enabled) "on" else "off"}: ${tools.reason}<br>" +
-            connectionLine(service.connectedClients) + "<br>" +
-            usageLines(service.usage).joinToString("<br>") { escape(it) } + "</html>"
+        val rows = mutableListOf(
+            row("Files", n.format(stats.files)),
+            row("Symbols", n.format(stats.symbols)),
+            row("Imports resolved", "${n.format(stats.resolvedImports)} / ${n.format(stats.imports)}"),
+            row("Last indexed", stats.indexedAt ?: "never"),
+            row("AI tools", if (tools.enabled) "on" else "off") + " · ${escape(tools.reason)}",
+            service.connectedClients.let {
+                if (it.isEmpty()) "Not connected to an AI client: click, then <b>Connect AI Client…</b>"
+                else row("Connected to", it.joinToString(", "))
+            },
+        )
+        val usage = service.usage
+        if (usage.total.calls == 0) {
+            rows += "No AI tool calls yet"
+        } else {
+            val today = usage.todayTotal()
+            rows += if (today.calls == 0) "No AI tool calls today · ${bold(n.format(usage.total.calls))} in total"
+            else "Today: ${bold(calls(today.calls))} · ~${bold(n.format(today.tokens))} tokens returned · ${bold(n.format(usage.total.calls))} in total"
+            for ((client, tally) in usage.today().entries.sortedByDescending { it.value.calls }) {
+                rows += "${escape(client)}: ${bold(calls(tally.calls))} · ~${bold(n.format(tally.tokens))} tokens"
+            }
+            if (usage.recent.isNotEmpty()) {
+                rows += "Latest<br>" + usage.recent.joinToString("<br>") {
+                    "${timeOf(it)} ${bold(it.tool.orEmpty())} · ${escape(clientName(it.client))} · ~${bold(n.format(it.tokens))} tokens${if (it.error != null) " · <b>failed</b>" else ""}"
+                }
+            }
+        }
+        return "<html>" + rows.joinToString("<hr>") + "</html>"
     }
+
+    private fun row(label: String, value: String) = "${escape(label)}: ${bold(value)}"
+    private fun bold(text: String) = "<b>${escape(text)}</b>"
 
     /** Today's tool calls per client and the latest calls, above the RefDex menu. */
     override fun getPopup(): ListPopup {
         val group = DefaultActionGroup()
         for (line in usageLines(service.usage)) group.add(InfoLine(line))
         group.add(Separator.getInstance())
-        group.addAll(ActionManager.getInstance().getAction("RefDex.Menu") as ActionGroup)
+        // Empty title: its bar is not part of the content the status bar measures, which floats the popup above the bar.
+        // The menu's own actions, not the menu as a submenu.
+        group.addAll((ActionManager.getInstance().getAction("RefDex.Menu") as DefaultActionGroup).childActionsOrStubs.toList())
         return JBPopupFactory.getInstance().createActionGroupPopup(
-            "RefDex", group, SimpleDataContext.getProjectContext(project), JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
+            "", group, SimpleDataContext.getProjectContext(project), JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
         )
     }
 
@@ -152,11 +177,11 @@ class RefdexStatusWidget(private val project: Project) : StatusBarWidget, Status
             if (clients.isEmpty()) "Not connected to an AI client: click, then Connect AI Client…"
             else "Connected to ${clients.joinToString(", ")}"
 
-        private fun calls(count: Int) = "${n.format(count)} call${if (count == 1) "" else "s"}"
+        fun calls(count: Int) = "${n.format(count)} call${if (count == 1) "" else "s"}"
 
-        private fun timeOf(r: UsageRecord): String =
+        fun timeOf(r: UsageRecord): String =
             runCatching { TIME.format(Instant.parse(r.t).atZone(ZoneId.systemDefault())) }.getOrDefault("--:--")
 
-        private fun escape(text: String) = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("  ", "&nbsp;&nbsp;")
+        fun escape(text: String) = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("  ", "&nbsp;&nbsp;")
     }
 }

@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit
  * the index up to date with a file watcher once the project has been indexed.
  */
 @Service(Service.Level.PROJECT)
-class RefdexProjectService(private val project: Project) : Disposable {
+class RefdexProjectService(val project: Project) : Disposable {
     val root: Path = Path.of(project.basePath ?: error("RefDex needs a project with a base directory"))
     val dbPath: Path = indexPathFor(root)
 

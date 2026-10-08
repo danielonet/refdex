@@ -68,7 +68,9 @@ class ClientSetup private constructor(private val service: RefdexProjectService)
 
     /**
      * Rewrites existing entries that start another command, e.g. after a plugin update moved the
-     * daemon or the AI tools settings changed. Never creates an entry the user did not ask for.
+     * daemon or the AI tools settings changed, and connects again the clients the user connected
+     * before whose entry is gone (a new IDE session, a wiped config). Never creates an entry the
+     * user did not ask for.
      */
     fun refreshStale() {
         val cmd = try {
@@ -76,8 +78,17 @@ class ClientSetup private constructor(private val service: RefdexProjectService)
         } catch (_: Exception) {
             return
         }
+        val remembered = RefdexSettings.getInstance(service.project).state.connectedClients
         for (target in targets) {
-            val entry = safely { target.entry() } ?: continue
+            val entry = safely { target.entry() }
+            if (entry == null) {
+                if (target.label in remembered) {
+                    LOG.info("RefDex: connecting ${target.label} again")
+                    safely { target.connect(cmd) }
+                }
+                continue
+            }
+            if (target.label !in remembered) remembered.add(target.label)
             if (entry.get("command")?.asString == cmd.command && entry.get("args") == cmd.toJson(false).get("args")) continue
             LOG.info("RefDex: updating the ${target.label} entry to this RefDex version and settings")
             safely { target.connect(cmd) }

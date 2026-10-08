@@ -94,6 +94,8 @@ class ConnectAiClientAction : RefdexAction() {
             ApplicationManager.getApplication().executeOnPooledThread {
                 try {
                     if (disconnect) target.disconnect() else target.connect(service.mcpCommand())
+                    val remembered = RefdexSettings.getInstance(project).state.connectedClients
+                    if (disconnect) remembered.remove(target.label) else if (target.label !in remembered) remembered.add(target.label)
                     service.notify(
                         if (disconnect) "Removed RefDex from ${target.label}."
                         else listOfNotNull("Connected RefDex to ${target.label} (${target.detail}).", target.afterConnect).joinToString(" "),

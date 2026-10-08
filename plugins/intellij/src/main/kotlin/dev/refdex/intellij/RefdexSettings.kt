@@ -29,6 +29,8 @@ class RefdexSettings : SimplePersistentStateComponent<RefdexSettings.State>(Stat
         var aiToolsMinTokens by property(DEFAULT_MIN_TOKENS)
         /** A daemon to use instead of the bundled one: an executable or a refdex.cjs bundle. */
         var daemonPath by string()
+        /** Labels of the AI clients the user connected, so they are connected again if their entry goes missing. */
+        var connectedClients by list<String>()
     }
 
     fun daemonOptions() = DaemonOptions(state.exclude.toList(), state.include.toList(), state.languages.toList(), state.watch)

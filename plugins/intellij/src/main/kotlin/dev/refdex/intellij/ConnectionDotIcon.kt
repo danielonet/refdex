@@ -1,6 +1,7 @@
 package dev.refdex.intellij
 
 import com.intellij.ui.JBColor
+import com.intellij.ui.scale.JBUIScale
 import com.intellij.util.ui.JBUI
 import java.awt.BasicStroke
 import java.awt.Color
@@ -32,7 +33,7 @@ class ConnectionDotIcon private constructor(private val connected: Boolean) : Ic
             g2.fill(Ellipse2D.Double(x.toDouble(), y.toDouble(), s, s))
             if (connected) {
                 g2.color = Color.WHITE
-                g2.stroke = BasicStroke(JBUI.scale(1.4f), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+                g2.stroke = BasicStroke(JBUIScale.scale(1.4f), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
                 g2.draw(Path2D.Double().apply {
                     moveTo(x + s * 0.27, y + s * 0.52)
                     lineTo(x + s * 0.44, y + s * 0.69)
