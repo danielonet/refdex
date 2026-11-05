@@ -4,10 +4,12 @@ name: Release
 # Release flow:  npm version patch -w refdex   (bumps packages/vscode/package.json)
 #                git commit -am "Release vX.Y.Z" && git tag vX.Y.Z
 #                git push --follow-tags
+# IntelliJ plugin (own version, plugins/intellij/gradle.properties pluginVersion):
+#                set pluginVersion, commit, git tag intellij-vX.Y.Z, git push --follow-tags
 
 on:
   push:
-    tags: ['v*.*.*']
+    tags: ['v*.*.*', 'intellij-v*.*.*']
   workflow_dispatch:
 
 permissions:
@@ -16,6 +18,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +56,38 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" refdex.vsix --generate-notes
+
+  publish-intellij:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/intellij-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci
+
+      - name: Check tag matches plugin version
+        if: startsWith(github.ref, 'refs/tags/intellij-v')
+        run: |
+          PKG="intellij-v$(sed -n 's/^pluginVersion *= *//p' plugins/intellij/gradle.properties)"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pluginVersion ($PKG)" >&2
+            exit 1
+          fi
+
+      - name: Test and build plugin
+        run: ./gradlew --no-daemon test buildPlugin
+        working-directory: plugins/intellij
+
+      - name: Publish to JetBrains Marketplace
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_PUBLISH_TOKEN }}
+        run: ./gradlew --no-daemon publishPlugin -PskipDaemonBuild
+        working-directory: plugins/intellij

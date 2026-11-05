@@ -48,6 +48,10 @@ intellijPlatform {
         }
     }
     buildSearchableOptions = false
+    publishing {
+        // JetBrains Marketplace token; set PUBLISH_TOKEN (a repository secret in CI).
+        token = providers.environmentVariable("PUBLISH_TOKEN")
+    }
     pluginVerification {
         ides {
             // -PverifyIde=<path of an installed IDE> checks against that IDE, without downloading any.
