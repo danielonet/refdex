@@ -1,0 +1,38 @@
+# A local Neo4j for RefDex's "Load into Neo4j" (VS Code) and `refdex neo4j load` (CLI).
+#
+#   docker compose -f neo4j/compose.yaml up -d
+#
+# Its address and login are RefDex's defaults, so RefDex connects without any settings:
+#   Bolt (RefDex):        neo4j://localhost:7687
+#   Neo4j Browser:        http://localhost:7474
+#   user / password:      neo4j / refdex-local
+#
+# This is a local development setup. The ports listen on this computer only (127.0.0.1), because
+# the default password is public. To choose your own, start it with NEO4J_PASSWORD set (at least
+# 8 characters; Neo4j refuses "neo4j") and enter that password once in RefDex:
+#   NEO4J_PASSWORD='your password' docker compose -f neo4j/compose.yaml up -d
+# The password is only applied when the data volume is first created; to change it later, run
+# `docker compose -f neo4j/compose.yaml down -v` (this deletes the loaded graph) and start again.
+#
+# For a shared or production server (Neo4j Aura, or your own), point RefDex at it instead:
+# "RefDex: Connect to Neo4j…" in VS Code, or `refdex neo4j load --uri ... --user ...` with the
+# password in REFDEX_NEO4J_PASSWORD. See the README.
+services:
+  neo4j:
+    image: neo4j:latest
+    container_name: refdex-neo4j
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-refdex-local}
+      # Large codebases (tens of thousands of symbols) load faster with more heap:
+      # NEO4J_server_memory_heap_max__size: 2G
+      # Graph algorithms (PageRank, communities) and utility procedures:
+      # NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+    volumes:
+      - refdex-neo4j-data:/data
+
+volumes:
+  refdex-neo4j-data:

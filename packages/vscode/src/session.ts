@@ -48,6 +48,11 @@ export interface SessionContext {
   storage: vscode.Uri;
 }
 
+/** Folders RefDex can index: those on disk (not virtual file systems). */
+export function localFolders(): readonly vscode.WorkspaceFolder[] {
+  return (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file');
+}
+
 /**
  * Where a folder's index lives. A single-folder window keeps `index.db` at the top of the
  * extension's workspace storage (as before multi-root support); a multi-root workspace gets one

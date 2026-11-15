@@ -117,6 +117,80 @@ method src/services/orderService:OrderService.constructor  src/services/orderSer
 | **Java** | Classes, records, interfaces, enums, annotations, overloads, nested types, static and wildcard imports |
 | **C#** | Classes, structs, records, interfaces, enums, delegates, properties, partial classes across files, file-scoped namespaces, `global using` |
 
+## Loading the code graph into Neo4j
+
+RefDex can load its index into [Neo4j](https://neo4j.com), as a graph to query and explore. Files and symbols become nodes. Declarations, calls, base types, type references and imports become relationships. Each workspace folder becomes a repository of an app named after the workspace, so the folders of a multi-root workspace sit side by side and can be queried together.
+
+### A local Neo4j
+
+By default, RefDex connects to Neo4j on your own computer with these settings:
+
+| | Default |
+| --- | --- |
+| Address (Bolt) | `neo4j://localhost:7687` |
+| Neo4j Browser | http://localhost:7474 |
+| User | `neo4j` |
+| Password | `refdex-local` |
+
+With Docker, save this as `compose.yaml` and run `docker compose up -d`. It starts a Neo4j with exactly these settings:
+
+```yaml
+services:
+  neo4j:
+    image: neo4j:latest
+    container_name: refdex-neo4j
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-refdex-local}
+    volumes:
+      - refdex-neo4j-data:/data
+volumes:
+  refdex-neo4j-data:
+```
+
+Neo4j doesn't accept `neo4j` as a password, or passwords shorter than 8 characters, so the local default is `refdex-local`. The ports listen on your computer only, because this password is public. To choose your own, start the container with `NEO4J_PASSWORD` set, and enter that password when RefDex asks for it.
+
+With Neo4j Desktop, create a local database: it listens on the default address. Either give it the password `refdex-local`, or enter the password you chose when RefDex asks.
+
+### Loading
+
+Run **RefDex: Load into Neo4j…**, or use the button in the RefDex panel. In a multi-root workspace, pick the folders to load. RefDex loads them in the background and shows progress in a notification, where you can cancel. Loading a folder again replaces only that folder's part of the graph. Then open Neo4j Browser (http://localhost:7474 for a local Neo4j).
+
+### Starter queries
+
+New to Cypher, Neo4j's query language? Each load stores ready-to-run queries with the app. They use real names from your code, such as your most called method and your largest file, so each one finds something on its first run, and its description says what to change to ask something else. Run **RefDex: Neo4j Starter Queries…**, or use the button in the RefDex panel, and pick one. RefDex copies it; paste it into Neo4j Browser's editor and press Ctrl+Enter (Cmd+Enter on a Mac). Queries marked as a graph draw nodes you can drag and click; the others show a table. **Open all in an editor** shows every query with its description.
+
+| Starter query | What it shows |
+| --- | --- |
+| Map of the app | The app and its repositories, as a graph |
+| What each repository contains | Classes, methods, functions and so on, counted per repository |
+| The most important code | The 25 symbols the rest of the code relies on most (PageRank) |
+| Everything in a file | The largest file, with what it declares and their members |
+| Where a class is used | Everything that calls or refers to the most used class |
+| Who calls a method | The callers of the most called method, and their callers |
+| What a method calls | What the method calling the most other code depends on, two steps deep |
+| Class hierarchy | Classes and the types they extend or implement |
+| Which files depend on which | Files and the files they import |
+| Files that import each other | Pairs of files that import each other |
+| The largest classes | Classes and interfaces with the most members |
+| Code nothing seems to use | Methods and functions nothing in the index calls (check before deleting) |
+| Find code by name | Symbols whose name contains a given text |
+
+They are also in Neo4j itself, for any client: `MATCH (q:StarterQuery) RETURN q.title, q.description, q.cypher ORDER BY q.order` lists them.
+
+### Your own server, or Neo4j online
+
+The defaults are for a local setup only. To use Neo4j Aura, a shared server or a production database, run **RefDex: Connect to Neo4j…** and enter its address, user and password. RefDex checks them before saving them. Aura and other servers with TLS use `neo4j+s://` addresses. The address, user and database are also settings: `refdex.neo4j.uri`, `refdex.neo4j.username` and `refdex.neo4j.database`. `refdex.neo4j.app` sets the app's name.
+
+On a shared server, RefDex labels every node it creates `:RefDex`, and adds constraints and indexes on the labels `App`, `Repository`, `File`, `Symbol` and `External`. The user needs permission to create nodes, constraints and indexes. A database of its own keeps the graph apart from other data.
+
+### Where the password is kept
+
+RefDex keeps the password in VS Code's secret storage, which encrypts it with your operating system's credential store: Keychain on macOS, DPAPI on Windows, and the Secret Service (GNOME Keyring or KWallet) on Linux. RefDex never writes the password to settings or files. It passes it to the background loader in that process's environment, not on its command line, which other users of the computer can see. **RefDex: Forget Neo4j Password** removes it. When no password is saved, RefDex uses the local default for a server on this computer only.
+
 ## Seeing what RefDex does
 
 - **Status bar:** the RefDex item shows the index at a glance: symbols per language, resolved imports, linked uses, connected assistants, and how many tool calls they made with roughly how many tokens returned.
@@ -134,6 +208,9 @@ method src/services/orderService:OrderService.constructor  src/services/orderSer
 | RefDex: Search Symbols | Jump to any indexed symbol by name |
 | RefDex: Connect Claude Code… | Add RefDex to Claude Code for this project, or remove it |
 | RefDex: Open Database… / Browse Database / Export Table to CSV… | Look inside the index |
+| RefDex: Load into Neo4j… | Load workspace folders into Neo4j as repositories of an app |
+| RefDex: Neo4j Starter Queries… | Ready-to-run queries for exploring the graph, to copy into Neo4j Browser |
+| RefDex: Connect to Neo4j… / Forget Neo4j Password | Set the Neo4j server and login, or remove the saved password |
 | RefDex: Toggle Watching for Changes | Turn automatic updates on or off |
 | RefDex: Show Log | Every MCP call and index query |
 
@@ -147,10 +224,17 @@ method src/services/orderService:OrderService.constructor  src/services/orderSer
 | `refdex.watch` | `true` | Keep the index up to date as files change |
 | `refdex.aiTools` | `auto` | When AI clients get RefDex's tools: `auto` (once the codebase is large enough), `always` or `never` |
 | `refdex.aiToolsMinTokens` | `100000` | Size of the indexed code, in estimated tokens, from which `auto` offers the tools |
+| `refdex.neo4j.uri` | `neo4j://localhost:7687` | Neo4j server for Load into Neo4j. The default is one on this computer |
+| `refdex.neo4j.username` | `neo4j` | Neo4j user. The password is kept in secret storage, not in settings |
+| `refdex.neo4j.database` | `""` | Database to load into. Empty means the server's default |
+| `refdex.neo4j.app` | `""` | The app the folders are loaded into. Empty means the workspace's name |
+| `refdex.neo4j.includeExternal` | `false` | Also load uses of names outside the index, such as library calls |
 
 ## Privacy
 
 RefDex runs entirely on your machine. The index is a SQLite database in VS Code's storage for the workspace, not in your repository. Nothing is uploaded. Your assistant sees only the answers to the tool calls it makes, and those calls appear in the log.
+
+The one exception is **Load into Neo4j**, and only when you run it. It sends the code graph to the Neo4j server you set: names, signatures, doc comments, file paths and line numbers, not the code itself. By default, that server is on your own computer.
 
 ## Requirements
 
@@ -163,4 +247,5 @@ RefDex runs entirely on your machine. The index is a SQLite database in VS Code'
 - RefDex links calls by scope and imports, without full type inference. A call on a variable whose type RefDex can't see is linked only when exactly one visible type declares that method, or when all of them are one type hierarchy (an interface and its implementations). `find_references` then also lists other lines that mention the name, so you can review them.
 - The blast radius follows linked calls only. Calls on the result of another call (`Joiner.on(",").join(…)`), reflection and dependency injection aren't followed; when there are unlinked calls that could lead to the method, the answer says so and shows an example, so an empty blast radius isn't mistaken for a safe change. "Tests that reach it" means tests that call it through that call graph, not runtime coverage.
 - Dynamic code (Python `getattr`, reflection, code generated at build time) isn't indexed.
-- In a multi-root workspace, one folder is indexed and kept current at a time.
+- In a multi-root workspace, one folder is indexed and kept current at a time. **Load into Neo4j** loads each folder's index as it was last updated, so a folder you haven't selected recently may be out of date in Neo4j.
+- Each repository's graph in Neo4j is separate: calls from one workspace folder into another aren't linked.

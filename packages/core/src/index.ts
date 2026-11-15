@@ -10,6 +10,14 @@ export {
 } from './db.ts';
 export { Indexer, type IndexSummary } from './indexer.ts';
 export { pageRank, type WeightedEdge } from './rank.ts';
+export { cypherLiteral } from './cypher-literal.ts';
+export {
+  addToSummary, exportNeo4j, inBatches, inSnapshot, loadStats, NEO4J_CLEAR, NEO4J_SCHEMA, NEO4J_SECTION, NEO4J_STATS, neo4jGroups, starterExamples,
+  type CypherGroup, type Neo4jExportOptions, type Neo4jExportSummary, type Neo4jTarget,
+} from './neo4j.ts';
+export {
+  NEO4J_LIST_STARTER_QUERIES, NEO4J_STARTER_QUERIES, NEO4J_STARTER_SOURCE, neo4jStarterQueries, starterQueriesScript, type StarterExamples, type StarterQuery,
+} from './neo4j-queries.ts';
 export { blastRadius, isTestPath, type BlastCaller, type BlastRadius, type UnlinkedCalls } from './blast.ts';
 export {
   CHARS_PER_TOKEN, entryDoc, entryHeader, levelChars, packContext, seedsFromTask, tokens, withKind,

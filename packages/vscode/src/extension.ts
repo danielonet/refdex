@@ -4,17 +4,13 @@ import { AboutViewProvider } from './aboutView';
 import { COPILOT_CHAT_ID, isInstalled, registerCopilotProvider } from './clients';
 import { DatabaseBrowser } from './databaseBrowser';
 import type { Daemon } from './daemon';
+import { Neo4jIntegration } from './neo4j';
 import { exportCsv, openDatabase } from './openDatabase';
-import { DAEMON_SETTINGS, FolderSession, indexPathFor } from './session';
+import { DAEMON_SETTINGS, FolderSession, indexPathFor, localFolders } from './session';
 import { StatusReport } from './statusReport';
 
 /** workspaceState key of the folder the user picked, as a URI string. */
 const FOLDER_KEY = 'refdex.folder';
-
-/** Folders RefDex can index: those on disk (not virtual file systems). */
-function localFolders(): readonly vscode.WorkspaceFolder[] {
-  return (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file');
-}
 
 export async function activate(context: vscode.ExtensionContext) {
   // A log channel: timestamps and levels, and every daemon request and MCP call (see session.ts).
@@ -26,6 +22,19 @@ export async function activate(context: vscode.ExtensionContext) {
   const storage = context.storageUri;
   const about = new AboutViewProvider(context, undefined);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(AboutViewProvider.viewType, about));
+
+  // Neo4j: connecting works without a folder; loading needs indexed folders (see neo4j.ts).
+  const neo4j = new Neo4jIntegration(context, log, storage && localFolders().length ? storage : undefined);
+  about.neo4j = neo4j;
+  context.subscriptions.push(
+    neo4j,
+    neo4j.onDidChange(() => void about.refresh()),
+    vscode.commands.registerCommand('refdex.neo4jConnect', () => neo4j.connect()),
+    vscode.commands.registerCommand('refdex.neo4jLoad', () => neo4j.load()),
+    vscode.commands.registerCommand('refdex.neo4jForget', () => neo4j.forget()),
+    vscode.commands.registerCommand('refdex.neo4jQueries', () => neo4j.starterQueries()),
+  );
+
   if (!storage || !localFolders().length) {
     status.noFolder();
     const needFolder = () => vscode.window.showWarningMessage('RefDex: open a folder to index it.');

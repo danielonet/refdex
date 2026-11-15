@@ -17,8 +17,6 @@
     "mcp",
     "mcp server",
     "model context protocol",
-    "claude",
-    "claude code",
     "copilot",
     "github copilot",
     "copilot agent",
@@ -43,7 +41,9 @@
     "python",
     "java",
     "csharp",
-    "c#"
+    "c#",
+    "neo4j",
+    "application context"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -98,6 +98,27 @@
       {
         "command": "refdex.exportCsv",
         "title": "Export Table to CSV\u2026",
+        "category": "RefDex"
+      },
+      {
+        "command": "refdex.neo4jLoad",
+        "title": "Load into Neo4j\u2026",
+        "category": "RefDex",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "refdex.neo4jConnect",
+        "title": "Connect to Neo4j\u2026",
+        "category": "RefDex"
+      },
+      {
+        "command": "refdex.neo4jQueries",
+        "title": "Neo4j Starter Queries\u2026",
+        "category": "RefDex"
+      },
+      {
+        "command": "refdex.neo4jForget",
+        "title": "Forget Neo4j Password",
         "category": "RefDex"
       },
       {
@@ -231,6 +252,31 @@
           "uniqueItems": true,
           "default": [],
           "description": "Languages to index. Empty means all supported languages."
+        },
+        "refdex.neo4j.uri": {
+          "type": "string",
+          "default": "neo4j://localhost:7687",
+          "markdownDescription": "Neo4j server for **Load into Neo4j**, as a Bolt address. The default is Neo4j on this computer: the Docker Compose setup in the README, or Neo4j Desktop. For Neo4j Aura or another server online, use its `neo4j+s://` address (TLS). **Connect to Neo4j\u2026** sets this, the username and the password."
+        },
+        "refdex.neo4j.username": {
+          "type": "string",
+          "default": "neo4j",
+          "markdownDescription": "Neo4j username. The password is not a setting: RefDex keeps it in VS Code's secret storage (your operating system's keychain) after **Connect to Neo4j\u2026**. Without one, a server on this computer gets the local default, `refdex-local`."
+        },
+        "refdex.neo4j.database": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Neo4j database to load into. Empty means the server's default database (`neo4j`)."
+        },
+        "refdex.neo4j.app": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The app the workspace's folders are loaded into, as `(:App)-[:HAS_REPOSITORY]->(:Repository)`. Empty means the workspace's name. Folders loaded into the same app can be queried together; loading a folder again replaces only that folder's part."
+        },
+        "refdex.neo4j.includeExternal": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Also load uses of names outside the index (library calls, dynamic or ambiguous ones) as `(:External {name})` nodes. Off by default: they are often more than half of all uses."
         }
       }
     },

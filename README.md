@@ -54,6 +54,7 @@ Reproduce with `node bench/run.ts --tasks bench/tasks/guava-accuracy.json --sour
 | `packages/core` | Language adapters, workspace scan, SQLite index and incremental indexer |
 | `packages/server` | The `refdex` CLI, the daemon (`refdex serve`: worker-thread indexing, file watcher) and the MCP server (`refdex mcp`); builds to a single executable |
 | `packages/vscode` | VS Code extension: daemon lifecycle, Copilot and Claude Code setup, status bar report, database browser. Its `README.md` is the Marketplace page |
+| `neo4j/compose.yaml` | A local Neo4j with RefDex's default address and login, for `refdex neo4j load` and Load into Neo4j |
 | `plugins/intellij` | IntelliJ plugin (Kotlin, Gradle): starts the bundled daemon, status bar widget, Reindex and Rebuild actions, settings page, and one-step MCP setup for Claude Code, Junie and Copilot |
 
 ## Development
@@ -90,6 +91,79 @@ node packages/server/dist/refdex.cjs index --root /path/to/project   # writes /p
 ```
 
 Tools: `get_context` (the code a task needs, within a token budget), `get_repo_map`, `search_symbols`, `get_file_outline`, `get_symbol_source` (optionally `with_callees`), `find_references` (optionally `depth` for the blast radius: indirect callers and the tests that reach a symbol). In the IDEs you don't need this by hand: the VS Code extension registers RefDex with Copilot automatically, and "RefDex: Connect Claude Code…" adds it to Claude Code for the open project. In IntelliJ, **Tools | RefDex | Connect AI Client…** does the same for Claude Code, Junie and Copilot.
+
+### The code graph in Neo4j
+
+RefDex can load the index into [Neo4j](https://neo4j.com) as a graph to query and explore. Files and symbols become nodes, and declarations, calls, base types, type references and imports become relationships. Each repository is a section of an app: one Neo4j database holds several repositories side by side, such as the folders of a VS Code workspace, and loading a repository again replaces only its own part. In VS Code it's **RefDex: Load into Neo4j…** (see [packages/vscode/README.md](packages/vscode/README.md)). From the command line it's `refdex neo4j load`.
+
+**A local Neo4j with RefDex's defaults.** [neo4j/compose.yaml](neo4j/compose.yaml) starts `neo4j:latest` with the address and login RefDex uses when nothing is configured, so no settings are needed:
+
+```sh
+docker compose -f neo4j/compose.yaml up -d
+```
+
+| | Default |
+| --- | --- |
+| Address (Bolt, what RefDex connects to) | `neo4j://localhost:7687` |
+| Neo4j Browser | http://localhost:7474 |
+| User / password | `neo4j` / `refdex-local` |
+
+Neo4j doesn't accept `neo4j` as a password, or passwords shorter than 8 characters, so the default is `refdex-local`. The ports listen on this computer only, because this password is public. RefDex uses the default only for a server on this computer, and only when no password is set. A Neo4j Desktop database on the default port works the same way, with its own password.
+
+```sh
+node packages/server/dist/refdex.cjs index --root /path/to/backend
+node packages/server/dist/refdex.cjs neo4j load --root /path/to/backend --app shop    # repository "backend" of app "shop"
+node packages/server/dist/refdex.cjs neo4j check                                      # the server, and the apps loaded so far
+```
+
+**Your own or an online server.** The defaults are for local development only. For Neo4j Aura, a shared server or a production database, pass its address and user, and put the password in `REFDEX_NEO4J_PASSWORD`. RefDex reads the password only from the environment, never from the command line, which other users of the computer can see. In VS Code, **RefDex: Connect to Neo4j…** stores it in VS Code's secret storage, which is backed by the operating system's keychain.
+
+```sh
+REFDEX_NEO4J_PASSWORD="$(cat ~/.config/refdex/neo4j-password)" \
+  node packages/server/dist/refdex.cjs neo4j load --root . --app shop \
+  --uri neo4j+s://<id>.databases.neo4j.io --user neo4j --database neo4j
+```
+
+`--repo` names the repository (by default, the folder's name). `--external` adds uses of names outside the index, such as library calls, as `(:External {name})` nodes. The loader needs Neo4j 5 or later; it was tested with 5.26 and 2026.10. On a shared server, RefDex labels every node it creates `:RefDex`, and adds constraints and indexes on the labels `App`, `Repository`, `File`, `Symbol` and `External`.
+
+| Node or relationship | Properties and meaning |
+| --- | --- |
+| `(:App)-[:HAS_REPOSITORY]->(:Repository)-[:HAS_FILE]->(:File)` | `App.name`; `Repository.name`, `files`, `symbols`, `relationships`, `loadedAt` |
+| `(:App)-[:HAS_QUERY]->(:StarterQuery)` | `title`, `description`, `cypher`, `order`: queries to start exploring with (below) |
+| `(:File)` | `app`, `repo`, `name`, `path` (relative to `--root`), `language`, `project` |
+| `(:Symbol)`, with its kind as a second label: `:Class`, `:Method`, … | `app`, `repo`, `name`, `qualifiedName`, `signature`, `doc`, `path`, `startLine`, `endLine`, `pagerank` |
+| `(:File)-[:DECLARES]->(:Symbol)` | The file's top-level declarations |
+| `(:Symbol)-[:CONTAINS]->(:Symbol)` | Class to method, namespace to class |
+| `(:File)-[:IMPORTS {lines}]->(:File)` | Resolved imports |
+| `-[:CALLS\|EXTENDS\|IMPLEMENTS\|REFERENCES {count, lines}]->(:Symbol)` | Linked uses, from a symbol, or from a file for module-level code |
+
+The parts of a C# partial type become one node. Each repository's graph is separate: calls from one repository into another aren't linked.
+
+**Starter queries for people new to Cypher.** Each load stores ready-to-run queries with the app, as `(:App)-[:HAS_QUERY]->(:StarterQuery {title, description, cypher})`. They use real names from the code, such as the most called method and the largest file, so each one finds something on its first run, and its description says what to change to ask something else. The names come from the app's largest repository. To list them, run this in Neo4j Browser, then copy a `cypher` value into the editor and run it:
+
+```cypher
+MATCH (q:StarterQuery) RETURN q.app AS app, q.title AS title, q.description AS description, q.cypher AS cypher ORDER BY app, q.order
+```
+
+In VS Code, **RefDex: Neo4j Starter Queries…** copies one for you or opens them all in an editor. `refdex neo4j queries --root <dir> --app <name>` prints them as a Cypher file without connecting to Neo4j.
+
+| Starter query | What it shows |
+| --- | --- |
+| Map of the app | The app and its repositories, as a graph |
+| What each repository contains | Classes, methods, functions and so on, counted per repository |
+| The most important code | The 25 symbols the rest of the code relies on most (PageRank) |
+| Everything in a file | The largest file, with what it declares and their members |
+| Where a class is used | Everything that calls or refers to the most used class |
+| Who calls a method | The callers of the most called method, and their callers |
+| What a method calls | What the method calling the most other code depends on, two steps deep |
+| Class hierarchy | Classes and the types they extend or implement |
+| Which files depend on which | Files and the files they import |
+| Files that import each other | Pairs of files that import each other |
+| The largest classes | Classes and interfaces with the most members |
+| Code nothing seems to use | Methods and functions nothing in the index calls (check before deleting) |
+| Find code by name | Symbols whose name contains a given text |
+
+**Without a connection.** `refdex export-neo4j <out.cypher> --root <dir> [--app <name>]` writes the same graph as a Cypher script, to run with `cypher-shell -f`. This suits small codebases only. A script inlines every row, so Neo4j parses and caches each batch as a separate query: at 80,000 symbols, a server with a 1 GB heap ran out of memory, while `refdex neo4j load` loaded the same graph in about 90 seconds.
 
 ### Debug builds: the MCP server over HTTP
 

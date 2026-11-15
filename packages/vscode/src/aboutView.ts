@@ -2,7 +2,8 @@ import { basename } from 'node:path';
 import * as vscode from 'vscode';
 import type { ClientState } from './clients';
 import type { Daemon, DaemonInfo, IndexStats } from './daemon';
-import { escapeHtml, formatBytes, getNonce, LANGUAGE_NAMES } from './webviewUtil';
+import type { Neo4jIntegration, Neo4jState } from './neo4j';
+import { count, escapeHtml, formatBytes, getNonce, LANGUAGE_NAMES, timeAgo } from './webviewUtil';
 
 /**
  * The "About" view in RefDex's activity bar panel: version, current configuration and buttons for
@@ -19,6 +20,8 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
   aiTools: { enabled: boolean; reason: string } | undefined;
   /** The daemon of the indexed folder; replaced when the user switches folders. */
   private daemon: Daemon | undefined;
+  /** Set by the extension: the Neo4j connection and last load, shown in their own section. */
+  neo4j: Neo4jIntegration | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -71,7 +74,8 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
       ]);
     }
     if (this.view) {
-      this.view.webview.html = this.html(this.view.webview, info);
+      const neo4j = await this.neo4j?.state().catch(() => undefined);
+      this.view.webview.html = this.html(this.view.webview, info, neo4j);
     }
   }
 
@@ -90,7 +94,28 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
     void vscode.window.showWarningMessage('RefDex: could not find README.md in the installed extension.');
   }
 
-  private html(webview: vscode.Webview, info: DaemonInfo | undefined): string {
+  /** Where the code graph goes in Neo4j: a local server by default, or one the user connected. */
+  private neo4jSection(n: Neo4jState, row: (key: string, value: string, title?: string) => string): string {
+    const { uri, user, app } = n.settings;
+    const login = n.saved ? 'password saved' : n.local ? 'local default' : 'not connected';
+    const last = n.lastLoad;
+    const loaded = last
+      ? `${escapeHtml(last.repositories.length === 1 ? last.repositories[0].name : count(last.repositories.length, 'repository', 'repositories'))}, ${timeAgo(last.at)}`
+      : 'never';
+    const lastTitle = last ? `${last.repositories.map((r) => `${r.name}: ${r.nodes.toLocaleString()} nodes`).join(', ')} into "${last.app}" at ${last.uri}` : undefined;
+    return `<h3>Neo4j</h3>
+  <table>
+    ${row('Server', escapeHtml(n.local ? `${uri} (this computer)` : uri))}
+    ${row('User', escapeHtml(`${user} (${login})`))}
+    ${row('App', escapeHtml(app))}
+    ${row('Last load', loaded, lastTitle)}
+  </table>
+  <button class="secondary" data-command="refdex.neo4jLoad">Load into Neo4j…</button>
+  <button class="secondary" data-command="refdex.neo4jQueries">Starter Queries…</button>
+  <button class="secondary" data-command="refdex.neo4jConnect">${n.saved || !n.local ? 'Change Neo4j Connection…' : 'Connect to Neo4j…'}</button>`;
+  }
+
+  private html(webview: vscode.Webview, info: DaemonInfo | undefined, neo4j: Neo4jState | undefined): string {
     const pkg = this.context.extension.packageJSON as { version?: string; description?: string };
     const cfg = vscode.workspace.getConfiguration('refdex');
     const exclude = cfg.get<string[]>('exclude', []);
@@ -167,6 +192,8 @@ export class AboutViewProvider implements vscode.WebviewViewProvider {
     ${row('Copilot', escapeHtml(copilot))}
     ${row('Claude Code', escapeHtml(claude))}
   </table>
+
+  ${neo4j ? this.neo4jSection(neo4j, row) : ''}
 
   <h3>Actions</h3>
   <button data-command="refdex.generateIndex">${indexed ? 'Regenerate Index' : 'Generate Index'}</button>
